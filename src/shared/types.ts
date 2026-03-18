@@ -64,7 +64,7 @@ export interface RequestLogEntry {
 export interface AppConfig {
   proxyPort: number;
   anthropicBaseUrl: string;
-  anthropicApiKey: string;
+  anthropicAuthToken: string;
   envVars: Record<string, string>;
 }
 
@@ -74,4 +74,11 @@ export interface StoreSchema {
   proxyPort: number;
   autoStart: boolean;
   minimizeToTray: boolean;
+  selectedModel: string | null;
+}
+
+// Model info from Copilot
+export interface ModelInfo {
+  id: string;
+  name: string;
 }

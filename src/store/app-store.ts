@@ -8,6 +8,7 @@ const store = new Store<StoreSchema>({
     proxyPort: DEFAULT_PROXY_PORT,
     autoStart: true,
     minimizeToTray: true,
+    selectedModel: null,
   },
 });
 
@@ -31,8 +32,20 @@ export function getAutoStart(): boolean {
   return store.get("autoStart");
 }
 
+export function setAutoStart(enabled: boolean): void {
+  store.set("autoStart", enabled);
+}
+
 export function getMinimizeToTray(): boolean {
   return store.get("minimizeToTray");
+}
+
+export function getSelectedModel(): string | null {
+  return store.get("selectedModel");
+}
+
+export function setSelectedModel(model: string | null): void {
+  store.set("selectedModel", model);
 }
 
 export default store;

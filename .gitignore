@@ -6,6 +6,9 @@ dist/
 out/
 .vite/
 
+# Test coverage
+coverage/
+
 # Source maps
 *.js.map
 
@@ -19,6 +22,7 @@ out/
 # OS files
 Thumbs.db
 .DS_Store
+nul
 
 # IDE
 .idea/

@@ -6,7 +6,12 @@ export type IpcChannels =
   | "proxy:stop"
   | "proxy:get-status"
   | "token:get-info"
-  | "config:get";
+  | "config:get"
+  | "models:get-available"
+  | "models:get-selected"
+  | "models:set-selected"
+  | "settings:get-auto-start"
+  | "settings:set-auto-start";
 
 export type IpcEvents =
   | "auth:status-changed"

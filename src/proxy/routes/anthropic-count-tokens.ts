@@ -12,8 +12,9 @@ export function registerCountTokensRoute(app: Hono) {
       const body = await c.req.json();
       const bodyStr = JSON.stringify(body);
 
-      // Rough estimate: ~4 characters per token
-      const inputTokens = Math.ceil(bodyStr.length / 4);
+      // Rough estimate: ~6 characters per token (conservative to avoid over-counting;
+      // JSON structure chars inflate the raw length relative to actual token count)
+      const inputTokens = Math.ceil(bodyStr.length / 6);
 
       return c.json({ input_tokens: inputTokens });
     } catch {

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import AuthPanel from "./components/AuthPanel";
 import ProxyPanel from "./components/ProxyPanel";
-import TokenCountdown from "./components/TokenCountdown";
+import ModelSelector from "./components/ModelSelector";
+import SettingsPanel from "./components/SettingsPanel";
 import RequestLog from "./components/RequestLog";
 import ConfigPanel from "./components/ConfigPanel";
 import StatusBar from "./components/StatusBar";
@@ -16,10 +17,11 @@ declare global {
 
 const api = window.copilotBridge;
 
+const MAX_LOGS = 200; // 10 pages × 20 per page
+
 export default function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ authenticated: false });
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ running: false, port: 23337, requestCount: 0 });
-  const [tokenInfo, setTokenInfo] = useState<TokenInfo>({ token: null, expiresAt: null, remainingSeconds: null });
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [logs, setLogs] = useState<RequestLogEntry[]>([]);
 
@@ -27,7 +29,6 @@ export default function App() {
   useEffect(() => {
     api.getAuthStatus().then((s: AuthStatus) => setAuthStatus(s));
     api.getProxyStatus().then((s: ProxyStatus) => setProxyStatus(s));
-    api.getTokenInfo().then((t: TokenInfo) => setTokenInfo(t));
     api.getConfig().then((c: AppConfig) => setConfig(c));
   }, []);
 
@@ -35,9 +36,11 @@ export default function App() {
   useEffect(() => {
     const unsubAuth = api.onAuthStatusChanged((s) => setAuthStatus(s as AuthStatus));
     const unsubProxy = api.onProxyStatusChanged((s) => setProxyStatus(s as ProxyStatus));
-    const unsubToken = api.onTokenInfoChanged((t) => setTokenInfo(t as TokenInfo));
+    const unsubToken = api.onTokenInfoChanged(() => {
+      // Token refresh still happens in background, no UI update needed
+    });
     const unsubLog = api.onRequestLog((log) => {
-      setLogs((prev) => [log as RequestLogEntry, ...prev].slice(0, 100));
+      setLogs((prev) => [log as RequestLogEntry, ...prev].slice(0, MAX_LOGS));
     });
 
     return () => {
@@ -47,15 +50,6 @@ export default function App() {
       unsubLog();
     };
   }, []);
-
-  // Refresh token info periodically
-  useEffect(() => {
-    if (!authStatus.authenticated) return;
-    const interval = setInterval(() => {
-      api.getTokenInfo().then((t: TokenInfo) => setTokenInfo(t));
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [authStatus.authenticated]);
 
   // Refresh config when proxy status changes
   useEffect(() => {
@@ -103,9 +97,10 @@ export default function App() {
           />
         </div>
 
-        {authStatus.authenticated && (
-          <TokenCountdown tokenInfo={tokenInfo} />
-        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <ModelSelector authenticated={authStatus.authenticated} />
+          <SettingsPanel />
+        </div>
 
         {config && proxyStatus.running && (
           <ConfigPanel config={config} />

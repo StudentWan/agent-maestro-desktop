@@ -1,44 +1,53 @@
-// Anthropic model → Copilot model mapping
+/**
+ * Map Anthropic model IDs to Copilot-compatible model IDs.
+ *
+ * Anthropic uses hyphens in version numbers (e.g. claude-sonnet-4-6)
+ * while Copilot uses dots (e.g. claude-sonnet-4.6).
+ * Anthropic also appends date suffixes (e.g. -20251001) which Copilot omits.
+ */
+
+// Explicit mappings for known models
 const MODEL_MAP: Record<string, string> = {
-  // Haiku → mini
-  "claude-haiku-4-5-20251001": "gpt-4o-mini",
-  "claude-3-5-haiku-20241022": "gpt-4o-mini",
-  "claude-3-haiku-20240307": "gpt-4o-mini",
-  // Everything else → gpt-4.1
+  // Opus
+  "claude-opus-4-6": "claude-opus-4.6",
+  "claude-opus-4-5": "claude-opus-4.5",
+  // Sonnet
+  "claude-sonnet-4-6": "claude-sonnet-4.6",
+  "claude-sonnet-4-5": "claude-sonnet-4.5",
+  "claude-sonnet-4-20250514": "claude-sonnet-4",
+  // Haiku
+  "claude-haiku-4-5-20251001": "claude-haiku-4.5",
+  "claude-3-5-haiku-20241022": "claude-haiku-4.5",
+  "claude-3-haiku-20240307": "claude-haiku-4.5",
 };
 
-const HAIKU_PATTERNS = [/haiku/i];
-
 /**
- * Map an Anthropic model name to a Copilot-compatible model name
+ * Convert an Anthropic model ID to a Copilot-compatible model ID.
+ *
+ * 1. Exact match from known mapping table
+ * 2. Pattern-based conversion: strip date suffix, convert last hyphen-separated
+ *    version digits to dot notation (e.g. claude-opus-4-6 → claude-opus-4.6)
+ * 3. Passthrough as-is if no conversion rule matches
  */
 export function mapModelName(anthropicModel: string): string {
-  // Direct mapping
+  // 1. Direct lookup
   if (MODEL_MAP[anthropicModel]) {
     return MODEL_MAP[anthropicModel];
   }
 
-  // Pattern-based mapping for haiku variants
-  for (const pattern of HAIKU_PATTERNS) {
-    if (pattern.test(anthropicModel)) {
-      return "gpt-4o-mini";
-    }
+  // 2. Pattern: strip trailing date suffix (-YYYYMMDD) and convert version
+  //    e.g. "claude-sonnet-4-6-20260101" → "claude-sonnet-4.6"
+  const withoutDate = anthropicModel.replace(/-\d{8}$/, "");
+  if (MODEL_MAP[withoutDate]) {
+    return MODEL_MAP[withoutDate];
   }
 
-  // Default: use gpt-4.1 for all Claude models
-  return "gpt-4.1";
-}
-
-/**
- * Get the max tokens for a mapped model
- */
-export function getModelMaxTokens(copilotModel: string): number {
-  switch (copilotModel) {
-    case "gpt-4o-mini":
-      return 16384;
-    case "gpt-4.1":
-      return 32768;
-    default:
-      return 16384;
+  // 3. Generic pattern: "claude-<family>-<major>-<minor>" → "claude-<family>-<major>.<minor>"
+  const match = withoutDate.match(/^(claude-(?:opus|sonnet|haiku))-(\d+)-(\d+)$/);
+  if (match) {
+    return `${match[1]}-${match[2]}.${match[3]}`;
   }
+
+  // 4. Passthrough
+  return anthropicModel;
 }
