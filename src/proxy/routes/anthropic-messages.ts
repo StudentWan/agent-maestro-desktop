@@ -58,8 +58,8 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
           );
         }
 
-        // Estimate input tokens (rough: ~4 chars per token)
-        const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 4);
+        // Estimate input tokens (rough: ~6 chars per token, conservative to avoid over-counting)
+        const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
 
         // Pipe through our transformer
         const transformer = createStreamTransformer(originalModel, inputEstimate);
@@ -93,6 +93,87 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("[Messages Route] Error:", message);
+
+      // Detect context window / context length exceeded errors from Copilot
+      const isContextExceeded =
+        /context.*(length|window|limit)|too many tokens/i.test(message);
+
+      if (isContextExceeded) {
+        const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
+        // Inflate to trigger Claude Code auto-compact
+        const inflatedTokens = inputEstimate * 2;
+
+        if (isStream) {
+          return stream(c, async (s) => {
+            c.header("Content-Type", "text/event-stream");
+            c.header("Cache-Control", "no-cache");
+            c.header("Connection", "keep-alive");
+
+            const fmt = (event: string, data: unknown) =>
+              `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+            await s.write(
+              fmt("message_start", {
+                type: "message_start",
+                message: {
+                  id: `msg_${Date.now()}`,
+                  type: "message",
+                  role: "assistant",
+                  model: originalModel,
+                  content: [],
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: {
+                    cache_creation: null,
+                    input_tokens: inflatedTokens,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: null,
+                    cache_read_input_tokens: null,
+                    server_tool_use: null,
+                    service_tier: "standard",
+                  },
+                },
+              }),
+            );
+            await s.write(
+              fmt("message_delta", {
+                type: "message_delta",
+                delta: {
+                  stop_reason: "model_context_window_exceeded",
+                  stop_sequence: null,
+                },
+                usage: {
+                  input_tokens: inflatedTokens,
+                  output_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  server_tool_use: null,
+                },
+              }),
+            );
+            await s.write(fmt("message_stop", { type: "message_stop" }));
+          });
+        }
+
+        return c.json({
+          id: `msg_${Date.now()}`,
+          type: "message",
+          role: "assistant",
+          model: originalModel,
+          content: [],
+          stop_reason: "model_context_window_exceeded",
+          stop_sequence: null,
+          usage: {
+            cache_creation: null,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+            input_tokens: inflatedTokens,
+            output_tokens: 0,
+            server_tool_use: null,
+            service_tier: null,
+          },
+        });
+      }
 
       return c.json(
         {

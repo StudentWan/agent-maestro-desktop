@@ -1,5 +1,5 @@
 import type { CopilotCompletionRequest, CopilotMessage } from "../copilot/types";
-import { mapModelName, getModelMaxTokens } from "./model-mapper";
+import { mapModelName } from "./model-mapper";
 import { convertToolsToOpenAI, convertToolChoiceToOpenAI } from "./tool-converter";
 import type { AnthropicRequest, AnthropicMessage, AnthropicContentBlock } from "./types";
 
@@ -29,7 +29,7 @@ export function convertAnthropicToOpenAI(request: AnthropicRequest): CopilotComp
     model: copilotModel,
     messages,
     stream: request.stream ?? false,
-    max_tokens: Math.min(request.max_tokens, getModelMaxTokens(copilotModel)),
+    max_tokens: request.max_tokens,
   };
 
   if (request.temperature !== undefined) {

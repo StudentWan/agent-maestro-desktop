@@ -1,14 +1,11 @@
 import type { CopilotStreamChoice } from "../copilot/types";
 
-interface ToolCallAccumulator {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
 /**
  * Transform a Copilot SSE stream (OpenAI format) into Anthropic SSE events.
  * Ensures prompt, agent-maestro-style message_start event as soon as stream starts.
+ *
+ * Tool calls are emitted immediately as content blocks (matching the original
+ * agent-maestro behaviour) rather than being deferred until [DONE].
  */
 export function createStreamTransformer(
   originalModel: string,
@@ -19,7 +16,11 @@ export function createStreamTransformer(
   let outputTokens = 0;
   let messageSent = false;
   let finishReason: string | null = null;
-  const toolCalls: Map<number, ToolCallAccumulator> = new Map();
+  let hasToolUse = false;
+
+  // Track which OpenAI tool_call indices have already been emitted as
+  // Anthropic content blocks (content_block_start sent).
+  const emittedToolCalls: Set<number> = new Set();
 
   function formatSSE(event: string, data: unknown): string {
     return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -50,7 +51,7 @@ export function createStreamTransformer(
     });
   }
 
-  function emitContentBlockStart(type: "text" | "tool_use", tool?: ToolCallAccumulator): string {
+  function emitContentBlockStart(type: "text" | "tool_use", tool?: { id: string; name: string }): string {
     contentBlockIndex++;
     currentBlockType = type;
     if (type === "text") {
@@ -97,7 +98,6 @@ export function createStreamTransformer(
   }
 
   function emitMessageEnd(reason: string | null): string {
-    const hasToolUse = toolCalls.size > 0;
     const stopReason = hasToolUse ? "tool_use" : mapFinishReasonToAnthropic(reason);
 
     let output = "";
@@ -153,14 +153,6 @@ export function createStreamTransformer(
             output += emitMessageStart();
             sentInitialMessageStart = true;
           }
-          for (const [, tc] of toolCalls.entries()) {
-            if (currentBlockType) {
-              output += emitContentBlockStop();
-              currentBlockType = null;
-            }
-            output += emitContentBlockStart("tool_use", tc);
-            output += emitToolInputDelta(tc.arguments);
-          }
           output += emitMessageEnd(finishReason);
           if (output) {
             controller.enqueue(output);
@@ -190,18 +182,31 @@ export function createStreamTransformer(
           }
           output += emitTextDelta(choice.delta.content);
         }
+        // Emit tool_calls immediately as Anthropic content blocks
         if (choice.delta.tool_calls) {
           for (const tc of choice.delta.tool_calls) {
-            const existing = toolCalls.get(tc.index);
-            if (!existing) {
-              toolCalls.set(tc.index, {
-                id: tc.id || `tool_${Date.now()}_${tc.index}`,
-                name: tc.function?.name || "",
-                arguments: tc.function?.arguments || "",
-              });
-            } else {
+            if (!emittedToolCalls.has(tc.index)) {
+              // First chunk for this tool call — emit content_block_start
+              hasToolUse = true;
+              emittedToolCalls.add(tc.index);
+
+              // Close previous block if open
+              if (currentBlockType) {
+                output += emitContentBlockStop();
+              }
+
+              const id = tc.id || `tool_${Date.now()}_${tc.index}`;
+              const name = tc.function?.name || "";
+              output += emitContentBlockStart("tool_use", { id, name });
+
+              // Emit initial arguments chunk if present
               if (tc.function?.arguments) {
-                existing.arguments += tc.function.arguments;
+                output += emitToolInputDelta(tc.function.arguments);
+              }
+            } else {
+              // Subsequent chunks — stream arguments as input_json_delta
+              if (tc.function?.arguments) {
+                output += emitToolInputDelta(tc.function.arguments);
               }
             }
           }
