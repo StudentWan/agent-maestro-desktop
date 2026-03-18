@@ -1,11 +1,28 @@
-import React from "react";
+import React, { useState, useMemo } from "react";
 import type { RequestLogEntry } from "../../shared/types";
+
+const PAGE_SIZE = 20;
 
 interface Props {
   logs: RequestLogEntry[];
 }
 
 export default function RequestLog({ logs }: Props) {
+  const [currentPage, setCurrentPage] = useState(1);
+
+  const totalPages = Math.max(1, Math.ceil(logs.length / PAGE_SIZE));
+
+  // Clamp current page if logs shrink
+  const safePage = Math.min(currentPage, totalPages);
+  if (safePage !== currentPage) {
+    setCurrentPage(safePage);
+  }
+
+  const pagedLogs = useMemo(() => {
+    const start = (safePage - 1) * PAGE_SIZE;
+    return logs.slice(start, start + PAGE_SIZE);
+  }, [logs, safePage]);
+
   if (logs.length === 0) {
     return (
       <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
@@ -32,7 +49,7 @@ export default function RequestLog({ logs }: Props) {
             </tr>
           </thead>
           <tbody>
-            {logs.map((log) => (
+            {pagedLogs.map((log) => (
               <tr key={log.id} className="border-b border-gray-700/50 hover:bg-gray-700/30">
                 <td className="py-2 pr-4 font-mono text-xs">
                   {new Date(log.timestamp).toLocaleTimeString()}
@@ -58,6 +75,29 @@ export default function RequestLog({ logs }: Props) {
           </tbody>
         </table>
       </div>
+
+      {/* Pagination controls */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-700">
+          <button
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={safePage <= 1}
+            className="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+          >
+            Previous
+          </button>
+          <span className="text-xs text-gray-400">
+            Page {safePage} / {totalPages}
+          </span>
+          <button
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={safePage >= totalPages}
+            className="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+          >
+            Next
+          </button>
+        </div>
+      )}
     </div>
   );
 }

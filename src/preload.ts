@@ -18,6 +18,15 @@ const api = {
   // Config
   getConfig: () => ipcRenderer.invoke("config:get" satisfies IpcChannels),
 
+  // Models
+  getAvailableModels: () => ipcRenderer.invoke("models:get-available" satisfies IpcChannels),
+  getSelectedModel: () => ipcRenderer.invoke("models:get-selected" satisfies IpcChannels),
+  setSelectedModel: (modelId: string) => ipcRenderer.invoke("models:set-selected" satisfies IpcChannels, modelId),
+
+  // Settings
+  getAutoStart: () => ipcRenderer.invoke("settings:get-auto-start" satisfies IpcChannels),
+  setAutoStart: (enabled: boolean) => ipcRenderer.invoke("settings:set-auto-start" satisfies IpcChannels, enabled),
+
   // Events from main process
   onAuthStatusChanged: (callback: (status: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);

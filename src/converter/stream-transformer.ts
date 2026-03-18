@@ -8,17 +8,7 @@ interface ToolCallAccumulator {
 
 /**
  * Transform a Copilot SSE stream (OpenAI format) into Anthropic SSE events.
- *
- * OpenAI streaming:
- *   data: {"choices":[{"delta":{"content":"hello"}}]}
- *
- * Anthropic streaming:
- *   event: message_start        → initial message envelope
- *   event: content_block_start  → new text/tool_use block
- *   event: content_block_delta  → text_delta / input_json_delta
- *   event: content_block_stop   → close current block
- *   event: message_delta        → stop_reason + final usage
- *   event: message_stop         → end
+ * Ensures prompt, agent-maestro-style message_start event as soon as stream starts.
  */
 export function createStreamTransformer(
   originalModel: string,
@@ -28,6 +18,7 @@ export function createStreamTransformer(
   let currentBlockType: "text" | "tool_use" | null = null;
   let outputTokens = 0;
   let messageSent = false;
+  let finishReason: string | null = null;
   const toolCalls: Map<number, ToolCallAccumulator> = new Map();
 
   function formatSSE(event: string, data: unknown): string {
@@ -48,7 +39,7 @@ export function createStreamTransformer(
         stop_sequence: null,
         usage: {
           input_tokens: inputTokenEstimate,
-          output_tokens: 0,
+          output_tokens: 1,
           cache_creation_input_tokens: null,
           cache_read_input_tokens: null,
           cache_creation: null,
@@ -62,7 +53,6 @@ export function createStreamTransformer(
   function emitContentBlockStart(type: "text" | "tool_use", tool?: ToolCallAccumulator): string {
     contentBlockIndex++;
     currentBlockType = type;
-
     if (type === "text") {
       return formatSSE("content_block_start", {
         type: "content_block_start",
@@ -70,7 +60,6 @@ export function createStreamTransformer(
         content_block: { type: "text", text: "", citations: null },
       });
     }
-
     return formatSSE("content_block_start", {
       type: "content_block_start",
       index: contentBlockIndex,
@@ -107,18 +96,15 @@ export function createStreamTransformer(
     });
   }
 
-  function emitMessageEnd(finishReason: string | null): string {
+  function emitMessageEnd(reason: string | null): string {
     const hasToolUse = toolCalls.size > 0;
-    const stopReason = hasToolUse ? "tool_use" : mapFinishReasonToAnthropic(finishReason);
+    const stopReason = hasToolUse ? "tool_use" : mapFinishReasonToAnthropic(reason);
 
     let output = "";
-
-    // Close current block if open
     if (currentBlockType) {
       output += emitContentBlockStop();
       currentBlockType = null;
     }
-
     output += formatSSE("message_delta", {
       type: "message_delta",
       delta: {
@@ -133,28 +119,23 @@ export function createStreamTransformer(
         server_tool_use: null,
       },
     });
-
     output += formatSSE("message_stop", { type: "message_stop" });
-
     return output;
   }
 
   // Buffer to collect raw SSE text, then parse synchronously per transform call
   let sseBuffer = "";
   let done = false;
+  let sentInitialMessageStart = false;
 
   function processSSEBuffer(controller: TransformStreamDefaultController<string>): void {
     // Split buffer into complete SSE frames (delimited by double newline)
     while (true) {
       const frameEnd = sseBuffer.indexOf("\n\n");
       if (frameEnd === -1) break;
-
       const frame = sseBuffer.slice(0, frameEnd).trim();
       sseBuffer = sseBuffer.slice(frameEnd + 2);
-
       if (!frame) continue;
-
-      // Parse SSE frame: extract "data: ..." lines
       const lines = frame.split("\n");
       let data = "";
       for (const line of lines) {
@@ -164,50 +145,42 @@ export function createStreamTransformer(
           data += line.slice(5);
         }
       }
-
       if (!data) continue;
-
       if (data === "[DONE]") {
-        // Finalize
-        let output = "";
-        if (!messageSent) {
-          output += emitMessageStart();
-        }
-
-        // Flush any pending tool calls
-        for (const [, tc] of toolCalls.entries()) {
-          if (currentBlockType) {
-            output += emitContentBlockStop();
-            currentBlockType = null;
+        if (!done) {
+          let output = "";
+          if (!sentInitialMessageStart) {
+            output += emitMessageStart();
+            sentInitialMessageStart = true;
           }
-          output += emitContentBlockStart("tool_use", tc);
-          output += emitToolInputDelta(tc.arguments);
+          for (const [, tc] of toolCalls.entries()) {
+            if (currentBlockType) {
+              output += emitContentBlockStop();
+              currentBlockType = null;
+            }
+            output += emitContentBlockStart("tool_use", tc);
+            output += emitToolInputDelta(tc.arguments);
+          }
+          output += emitMessageEnd(finishReason);
+          if (output) {
+            controller.enqueue(output);
+          }
+          done = true;
         }
-
-        output += emitMessageEnd(null);
-        if (output) {
-          controller.enqueue(output);
-        }
-        done = true;
         return;
       }
-
       try {
         const chunk = JSON.parse(data) as {
           choices: CopilotStreamChoice[];
         };
-
         if (!chunk.choices || chunk.choices.length === 0) continue;
-
         const choice = chunk.choices[0];
         let output = "";
-
         // Ensure message_start is sent first
-        if (!messageSent) {
+        if (!sentInitialMessageStart) {
           output += emitMessageStart();
+          sentInitialMessageStart = true;
         }
-
-        // Handle text content
         if (choice.delta.content != null && choice.delta.content !== "") {
           if (currentBlockType !== "text") {
             if (currentBlockType) {
@@ -217,43 +190,25 @@ export function createStreamTransformer(
           }
           output += emitTextDelta(choice.delta.content);
         }
-
-        // Handle tool calls (accumulated across chunks)
         if (choice.delta.tool_calls) {
           for (const tc of choice.delta.tool_calls) {
             const existing = toolCalls.get(tc.index);
-
             if (!existing) {
-              // New tool call
               toolCalls.set(tc.index, {
                 id: tc.id || `tool_${Date.now()}_${tc.index}`,
                 name: tc.function?.name || "",
                 arguments: tc.function?.arguments || "",
               });
             } else {
-              // Append to existing
               if (tc.function?.arguments) {
                 existing.arguments += tc.function.arguments;
               }
             }
           }
         }
-
-        // Handle finish
         if (choice.finish_reason) {
-          // Flush tool calls
-          for (const [, tc] of toolCalls) {
-            if (currentBlockType) {
-              output += emitContentBlockStop();
-              currentBlockType = null;
-            }
-            output += emitContentBlockStart("tool_use", tc);
-            output += emitToolInputDelta(tc.arguments);
-          }
-
-          output += emitMessageEnd(choice.finish_reason);
+          finishReason = choice.finish_reason;
         }
-
         if (output) {
           controller.enqueue(output);
         }
@@ -265,25 +220,27 @@ export function createStreamTransformer(
 
   return new TransformStream<Uint8Array, string>({
     transform(chunk, controller) {
+      if (!sentInitialMessageStart) {
+        controller.enqueue(emitMessageStart());
+        sentInitialMessageStart = true;
+      }
       if (done) return;
       sseBuffer += new TextDecoder().decode(chunk);
       processSSEBuffer(controller);
     },
-
     flush(controller) {
       if (done) return;
-      // Process any remaining data in the buffer
       if (sseBuffer.trim()) {
-        sseBuffer += "\n\n"; // Ensure last frame is terminated
+        sseBuffer += "\n\n";
         processSSEBuffer(controller);
       }
-      // If we never got [DONE], emit a fallback message_stop
       if (!done) {
         let output = "";
-        if (!messageSent) {
+        if (!sentInitialMessageStart) {
           output += emitMessageStart();
+          sentInitialMessageStart = true;
         }
-        output += emitMessageEnd(null);
+        output += emitMessageEnd(finishReason);
         if (output) {
           controller.enqueue(output);
         }

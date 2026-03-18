@@ -7,9 +7,14 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     name: "Agent Maestro Desktop",
+    icon: "assets/icon",
+    extraResource: ["assets/icon.ico"],
   },
   makers: [
-    new MakerSquirrel({}),
+    new MakerSquirrel({
+      iconUrl: "https://raw.githubusercontent.com/user/agent-maestro-desktop/main/assets/icon.ico",
+      setupIcon: "assets/icon.ico",
+    }),
     new MakerZIP({}, ["darwin", "linux"]),
   ],
   plugins: [

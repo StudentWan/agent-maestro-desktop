@@ -1,11 +1,13 @@
-import { ipcMain, shell, BrowserWindow } from "electron";
+import { ipcMain, shell, BrowserWindow, app } from "electron";
 import type { IpcChannels } from "../shared/ipc-channels";
 import { requestDeviceCode, pollForAccessToken, getGitHubUsername } from "../copilot/auth";
 import { TokenManager } from "../copilot/token-manager";
 import { CopilotClient } from "../copilot/client";
+import { fetchAvailableModels } from "../copilot/models";
 import { ProxyServer } from "../proxy/server";
-import { getGithubToken, setGithubToken, getProxyPort } from "../store/app-store";
-import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry } from "../shared/types";
+import { getGithubToken, setGithubToken, getProxyPort, getAutoStart, setAutoStart, getSelectedModel, setSelectedModel } from "../store/app-store";
+import { applyClaudeConfig, removeClaudeConfig, writeModelToClaudeConfig } from "./claude-config";
+import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry, ModelInfo } from "../shared/types";
 
 let tokenManager: TokenManager | null = null;
 let copilotClient: CopilotClient | null = null;
@@ -105,6 +107,12 @@ export function registerIpcHandlers(): void {
       console.log("[IPC] Session restored for user:", username);
       sendToRenderer("auth:status-changed", getAuthStatus());
       sendToRenderer("proxy:status-changed", getProxyStatus());
+
+      // Auto-configure Claude Code to use our proxy
+      const port = proxyServer?.getPort() ?? getProxyPort();
+      applyClaudeConfig(port).catch((err) => {
+        console.error("[IPC] Failed to apply Claude config:", err);
+      });
     }
   });
 
@@ -157,6 +165,12 @@ export function registerIpcHandlers(): void {
       sendToRenderer("auth:status-changed", status);
       sendToRenderer("proxy:status-changed", getProxyStatus());
 
+      // Auto-configure Claude Code to use our proxy
+      const port = proxyServer?.getPort() ?? getProxyPort();
+      applyClaudeConfig(port).catch((err) => {
+        console.error("[IPC] Failed to apply Claude config:", err);
+      });
+
       return status;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -177,6 +191,12 @@ export function registerIpcHandlers(): void {
 
     // Clear stored token
     setGithubToken(null);
+
+    // Remove Claude Code proxy configuration
+    const port = proxyServer?.getPort() ?? getProxyPort();
+    removeClaudeConfig(port).catch((err) => {
+      console.error("[IPC] Failed to remove Claude config:", err);
+    });
 
     const status = getAuthStatus();
     sendToRenderer("auth:status-changed", status);
@@ -227,13 +247,68 @@ export function registerIpcHandlers(): void {
     const config: AppConfig = {
       proxyPort: port,
       anthropicBaseUrl: `http://127.0.0.1:${port}`,
-      anthropicApiKey: "copilot-bridge",
+      anthropicAuthToken: "Powered by Agent Maestro Desktop",
       envVars: {
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        ANTHROPIC_API_KEY: "copilot-bridge",
+        ANTHROPIC_AUTH_TOKEN: "Powered by Agent Maestro Desktop",
       },
     };
     return config;
+  });
+
+  // --- Model handlers ---
+
+  ipcMain.handle("models:get-available" satisfies IpcChannels, async () => {
+    if (!tokenManager) {
+      return [];
+    }
+    try {
+      const models = await fetchAvailableModels(tokenManager);
+
+      // Auto-select first model if none is currently selected
+      const currentModel = getSelectedModel();
+      if ((!currentModel || currentModel === "") && models.length > 0) {
+        const firstModel = models[0].id;
+        setSelectedModel(firstModel);
+        await writeModelToClaudeConfig(firstModel);
+        console.log(`[IPC] Auto-selected first model: ${firstModel}`);
+      }
+
+      return models;
+    } catch (error) {
+      console.error("[IPC] Failed to fetch models:", error);
+      return [];
+    }
+  });
+
+  ipcMain.handle("models:get-selected" satisfies IpcChannels, () => {
+    return getSelectedModel();
+  });
+
+  ipcMain.handle("models:set-selected" satisfies IpcChannels, async (_event, modelId: string) => {
+    setSelectedModel(modelId);
+    // Write model to Claude config
+    try {
+      await writeModelToClaudeConfig(modelId);
+      console.log(`[IPC] Model set to: ${modelId}`);
+    } catch (error) {
+      console.error("[IPC] Failed to write model to Claude config:", error);
+    }
+    return modelId;
+  });
+
+  // --- Settings handlers ---
+
+  ipcMain.handle("settings:get-auto-start" satisfies IpcChannels, () => {
+    return getAutoStart();
+  });
+
+  ipcMain.handle("settings:set-auto-start" satisfies IpcChannels, (_event, enabled: boolean) => {
+    setAutoStart(enabled);
+    if (app.isPackaged) {
+      app.setLoginItemSettings({ openAtLogin: enabled });
+    }
+    return enabled;
   });
 }
 

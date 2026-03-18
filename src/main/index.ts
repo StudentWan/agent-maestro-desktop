@@ -1,7 +1,7 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, Menu, Tray, nativeImage } from "electron";
 import path from "path";
 import { registerIpcHandlers, cleanup } from "./ipc-handlers";
-import { getMinimizeToTray } from "../store/app-store";
+import { getAutoStart } from "../store/app-store";
 
 // Handle Squirrel events for Windows installer (only when installed via Squirrel)
 try {
@@ -21,12 +21,57 @@ process.on("unhandledRejection", (reason) => {
 });
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let isQuitting = false;
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
+function getIconPath(): string {
+  // In production (packaged), resources are in the app's resources directory
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "icon.ico");
+  }
+  // In development, use the project root
+  return path.join(__dirname, "../../assets/icon.ico");
+}
+
+function createTray(): void {
+  const iconPath = getIconPath();
+  const icon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  tray.setToolTip("Agent Maestro Desktop");
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "Show",
+      click: () => {
+        mainWindow?.show();
+        mainWindow?.focus();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+
+  tray.on("double-click", () => {
+    mainWindow?.show();
+    mainWindow?.focus();
+  });
+}
+
 function createWindow(): void {
+  const iconPath = getIconPath();
+  const icon = nativeImage.createFromPath(iconPath);
+
   mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
@@ -34,12 +79,17 @@ function createWindow(): void {
     minHeight: 400,
     show: true,
     title: "Agent Maestro Desktop",
+    icon: icon.isEmpty() ? undefined : icon,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  // Remove menu bar completely
+  mainWindow.setMenu(null);
 
   console.log("[Main] Window created, loading content...");
 
@@ -62,7 +112,7 @@ function createWindow(): void {
 
   // Close to tray instead of quitting
   mainWindow.on("close", (event) => {
-    if (getMinimizeToTray() && !isQuitting) {
+    if (!isQuitting) {
       event.preventDefault();
       mainWindow?.hide();
     }
@@ -78,6 +128,18 @@ app.whenReady().then(() => {
 
   // Register IPC handlers before creating window
   registerIpcHandlers();
+
+  // Create system tray
+  createTray();
+
+  // Set auto-launch based on stored preference
+  if (!app.isPackaged) {
+    // Skip in dev mode
+  } else {
+    app.setLoginItemSettings({
+      openAtLogin: getAutoStart(),
+    });
+  }
 
   createWindow();
 });
@@ -99,4 +161,8 @@ app.on("activate", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   cleanup();
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });

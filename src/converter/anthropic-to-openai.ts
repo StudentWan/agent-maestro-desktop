@@ -55,7 +55,13 @@ export function convertAnthropicToOpenAI(request: AnthropicRequest): CopilotComp
 }
 
 /**
- * Convert a single Anthropic message to one or more OpenAI messages
+ * Convert a single Anthropic message to one or more OpenAI messages.
+ *
+ * In the Anthropic API, tool_result blocks live inside user messages.
+ * In the OpenAI API, tool results are separate "tool" role messages that
+ * MUST immediately follow the assistant message containing the corresponding
+ * tool_calls. Therefore, for user messages we emit tool results first,
+ * then any remaining text content.
  */
 function convertMessage(msg: AnthropicMessage): CopilotMessage[] {
   // Simple string content
@@ -63,27 +69,26 @@ function convertMessage(msg: AnthropicMessage): CopilotMessage[] {
     return [{ role: msg.role, content: msg.content }];
   }
 
-  // Array content — need to handle tool_use/tool_result blocks specially
-  const messages: CopilotMessage[] = [];
-  let textAccum = "";
-  const toolCalls: CopilotMessage["tool_calls"] = [];
+  if (msg.role === "assistant") {
+    return convertAssistantMessage(msg.content);
+  }
 
-  for (const block of msg.content) {
+  return convertUserMessage(msg.content);
+}
+
+/**
+ * Convert an assistant message's content blocks.
+ * Collects text and tool_use blocks into a single assistant message.
+ */
+function convertAssistantMessage(content: AnthropicContentBlock[]): CopilotMessage[] {
+  let textAccum = "";
+  const toolCalls: NonNullable<CopilotMessage["tool_calls"]> = [];
+
+  for (const block of content) {
     switch (block.type) {
       case "text":
         textAccum += block.text;
         break;
-
-      case "image":
-        // Skip images for now — Copilot may not support vision
-        textAccum += "[Image content omitted]";
-        break;
-
-      case "thinking":
-      case "redacted_thinking":
-        // Filter out thinking blocks — not supported by Copilot
-        break;
-
       case "tool_use":
         toolCalls.push({
           id: block.id,
@@ -94,39 +99,69 @@ function convertMessage(msg: AnthropicMessage): CopilotMessage[] {
           },
         });
         break;
+      case "thinking":
+      case "redacted_thinking":
+        // Filter out thinking blocks — not supported by Copilot
+        break;
+    }
+  }
 
-      case "tool_result":
-        // Tool results become separate "tool" role messages
-        // Flush any accumulated text first
-        if (textAccum) {
-          messages.push({ role: msg.role, content: textAccum });
-          textAccum = "";
-        }
+  if (toolCalls.length > 0) {
+    return [{
+      role: "assistant",
+      content: textAccum || null,
+      tool_calls: toolCalls,
+    }];
+  }
 
+  return [{ role: "assistant", content: textAccum || "" }];
+}
+
+/**
+ * Convert a user message's content blocks.
+ *
+ * OpenAI requires that "tool" role messages immediately follow the assistant
+ * message that produced the tool_calls. So we emit tool results FIRST,
+ * then any remaining text as a user message.
+ */
+function convertUserMessage(content: AnthropicContentBlock[]): CopilotMessage[] {
+  const toolResults: CopilotMessage[] = [];
+  let textAccum = "";
+
+  for (const block of content) {
+    switch (block.type) {
+      case "text":
+        textAccum += block.text;
+        break;
+      case "image":
+        textAccum += "[Image content omitted]";
+        break;
+      case "tool_result": {
         const resultContent = getToolResultContent(block);
-        messages.push({
+        toolResults.push({
           role: "tool",
           content: resultContent,
           tool_call_id: block.tool_use_id,
         });
         break;
+      }
+      case "thinking":
+      case "redacted_thinking":
+        break;
     }
   }
 
-  // Handle assistant message with tool calls
-  if (msg.role === "assistant" && toolCalls.length > 0) {
-    messages.push({
-      role: "assistant",
-      content: textAccum || null,
-      tool_calls: toolCalls,
-    });
-  } else if (textAccum) {
-    messages.push({ role: msg.role, content: textAccum });
+  // Emit tool results first (they must follow the assistant's tool_calls),
+  // then text content as a user message
+  const messages: CopilotMessage[] = [...toolResults];
+
+  if (textAccum) {
+    messages.push({ role: "user", content: textAccum });
   }
 
   // If no messages were generated, add an empty one to avoid dropping the turn
   if (messages.length === 0) {
-    messages.push({ role: msg.role, content: "" });
+    messages.push({ role: "user", content: "" });
   }
 
   return messages;
