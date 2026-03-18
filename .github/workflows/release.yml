@@ -29,8 +29,8 @@ jobs:
       - name: Find and rename installer
         run: |
           $exe = Get-ChildItem -Path .\out\make\squirrel.windows\x64\*.exe -ErrorAction Stop | Select-Object -First 1
-          $target = ".\out\make\squirrel.windows\x64\AgentMaestroDesktop-${{ github.event.inputs.version }}.exe"
-          Rename-Item $exe.FullName $target
+          $newName = "AgentMaestroDesktop-${{ github.event.inputs.version }}.exe"
+          Rename-Item $exe.FullName -NewName $newName
         shell: pwsh
 
       - name: Create GitHub Release
