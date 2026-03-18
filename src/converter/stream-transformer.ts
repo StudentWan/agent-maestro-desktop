@@ -1,0 +1,306 @@
+import type { CopilotStreamChoice } from "../copilot/types";
+
+interface ToolCallAccumulator {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/**
+ * Transform a Copilot SSE stream (OpenAI format) into Anthropic SSE events.
+ *
+ * OpenAI streaming:
+ *   data: {"choices":[{"delta":{"content":"hello"}}]}
+ *
+ * Anthropic streaming:
+ *   event: message_start        → initial message envelope
+ *   event: content_block_start  → new text/tool_use block
+ *   event: content_block_delta  → text_delta / input_json_delta
+ *   event: content_block_stop   → close current block
+ *   event: message_delta        → stop_reason + final usage
+ *   event: message_stop         → end
+ */
+export function createStreamTransformer(
+  originalModel: string,
+  inputTokenEstimate: number,
+): TransformStream<Uint8Array, string> {
+  let contentBlockIndex = -1;
+  let currentBlockType: "text" | "tool_use" | null = null;
+  let outputTokens = 0;
+  let messageSent = false;
+  const toolCalls: Map<number, ToolCallAccumulator> = new Map();
+
+  function formatSSE(event: string, data: unknown): string {
+    return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  function emitMessageStart(): string {
+    messageSent = true;
+    return formatSSE("message_start", {
+      type: "message_start",
+      message: {
+        id: `msg_${Date.now()}`,
+        type: "message",
+        role: "assistant",
+        model: originalModel,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: inputTokenEstimate,
+          output_tokens: 0,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+          cache_creation: null,
+          server_tool_use: null,
+          service_tier: "standard",
+        },
+      },
+    });
+  }
+
+  function emitContentBlockStart(type: "text" | "tool_use", tool?: ToolCallAccumulator): string {
+    contentBlockIndex++;
+    currentBlockType = type;
+
+    if (type === "text") {
+      return formatSSE("content_block_start", {
+        type: "content_block_start",
+        index: contentBlockIndex,
+        content_block: { type: "text", text: "", citations: null },
+      });
+    }
+
+    return formatSSE("content_block_start", {
+      type: "content_block_start",
+      index: contentBlockIndex,
+      content_block: {
+        type: "tool_use",
+        id: tool?.id || "",
+        name: tool?.name || "",
+        input: {},
+      },
+    });
+  }
+
+  function emitTextDelta(text: string): string {
+    outputTokens++;
+    return formatSSE("content_block_delta", {
+      type: "content_block_delta",
+      index: contentBlockIndex,
+      delta: { type: "text_delta", text },
+    });
+  }
+
+  function emitToolInputDelta(json: string): string {
+    return formatSSE("content_block_delta", {
+      type: "content_block_delta",
+      index: contentBlockIndex,
+      delta: { type: "input_json_delta", partial_json: json },
+    });
+  }
+
+  function emitContentBlockStop(): string {
+    return formatSSE("content_block_stop", {
+      type: "content_block_stop",
+      index: contentBlockIndex,
+    });
+  }
+
+  function emitMessageEnd(finishReason: string | null): string {
+    const hasToolUse = toolCalls.size > 0;
+    const stopReason = hasToolUse ? "tool_use" : mapFinishReasonToAnthropic(finishReason);
+
+    let output = "";
+
+    // Close current block if open
+    if (currentBlockType) {
+      output += emitContentBlockStop();
+      currentBlockType = null;
+    }
+
+    output += formatSSE("message_delta", {
+      type: "message_delta",
+      delta: {
+        stop_reason: stopReason,
+        stop_sequence: null,
+      },
+      usage: {
+        input_tokens: inputTokenEstimate,
+        output_tokens: Math.max(outputTokens, 1),
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        server_tool_use: null,
+      },
+    });
+
+    output += formatSSE("message_stop", { type: "message_stop" });
+
+    return output;
+  }
+
+  // Buffer to collect raw SSE text, then parse synchronously per transform call
+  let sseBuffer = "";
+  let done = false;
+
+  function processSSEBuffer(controller: TransformStreamDefaultController<string>): void {
+    // Split buffer into complete SSE frames (delimited by double newline)
+    while (true) {
+      const frameEnd = sseBuffer.indexOf("\n\n");
+      if (frameEnd === -1) break;
+
+      const frame = sseBuffer.slice(0, frameEnd).trim();
+      sseBuffer = sseBuffer.slice(frameEnd + 2);
+
+      if (!frame) continue;
+
+      // Parse SSE frame: extract "data: ..." lines
+      const lines = frame.split("\n");
+      let data = "";
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          data += line.slice(6);
+        } else if (line.startsWith("data:")) {
+          data += line.slice(5);
+        }
+      }
+
+      if (!data) continue;
+
+      if (data === "[DONE]") {
+        // Finalize
+        let output = "";
+        if (!messageSent) {
+          output += emitMessageStart();
+        }
+
+        // Flush any pending tool calls
+        for (const [, tc] of toolCalls.entries()) {
+          if (currentBlockType) {
+            output += emitContentBlockStop();
+            currentBlockType = null;
+          }
+          output += emitContentBlockStart("tool_use", tc);
+          output += emitToolInputDelta(tc.arguments);
+        }
+
+        output += emitMessageEnd(null);
+        if (output) {
+          controller.enqueue(output);
+        }
+        done = true;
+        return;
+      }
+
+      try {
+        const chunk = JSON.parse(data) as {
+          choices: CopilotStreamChoice[];
+        };
+
+        if (!chunk.choices || chunk.choices.length === 0) continue;
+
+        const choice = chunk.choices[0];
+        let output = "";
+
+        // Ensure message_start is sent first
+        if (!messageSent) {
+          output += emitMessageStart();
+        }
+
+        // Handle text content
+        if (choice.delta.content != null && choice.delta.content !== "") {
+          if (currentBlockType !== "text") {
+            if (currentBlockType) {
+              output += emitContentBlockStop();
+            }
+            output += emitContentBlockStart("text");
+          }
+          output += emitTextDelta(choice.delta.content);
+        }
+
+        // Handle tool calls (accumulated across chunks)
+        if (choice.delta.tool_calls) {
+          for (const tc of choice.delta.tool_calls) {
+            const existing = toolCalls.get(tc.index);
+
+            if (!existing) {
+              // New tool call
+              toolCalls.set(tc.index, {
+                id: tc.id || `tool_${Date.now()}_${tc.index}`,
+                name: tc.function?.name || "",
+                arguments: tc.function?.arguments || "",
+              });
+            } else {
+              // Append to existing
+              if (tc.function?.arguments) {
+                existing.arguments += tc.function.arguments;
+              }
+            }
+          }
+        }
+
+        // Handle finish
+        if (choice.finish_reason) {
+          // Flush tool calls
+          for (const [, tc] of toolCalls) {
+            if (currentBlockType) {
+              output += emitContentBlockStop();
+              currentBlockType = null;
+            }
+            output += emitContentBlockStart("tool_use", tc);
+            output += emitToolInputDelta(tc.arguments);
+          }
+
+          output += emitMessageEnd(choice.finish_reason);
+        }
+
+        if (output) {
+          controller.enqueue(output);
+        }
+      } catch {
+        // Skip malformed chunks
+      }
+    }
+  }
+
+  return new TransformStream<Uint8Array, string>({
+    transform(chunk, controller) {
+      if (done) return;
+      sseBuffer += new TextDecoder().decode(chunk);
+      processSSEBuffer(controller);
+    },
+
+    flush(controller) {
+      if (done) return;
+      // Process any remaining data in the buffer
+      if (sseBuffer.trim()) {
+        sseBuffer += "\n\n"; // Ensure last frame is terminated
+        processSSEBuffer(controller);
+      }
+      // If we never got [DONE], emit a fallback message_stop
+      if (!done) {
+        let output = "";
+        if (!messageSent) {
+          output += emitMessageStart();
+        }
+        output += emitMessageEnd(null);
+        if (output) {
+          controller.enqueue(output);
+        }
+      }
+    },
+  });
+}
+
+function mapFinishReasonToAnthropic(reason: string | null): string {
+  switch (reason) {
+    case "stop":
+      return "end_turn";
+    case "length":
+      return "max_tokens";
+    case "tool_calls":
+      return "tool_use";
+    default:
+      return "end_turn";
+  }
+}
