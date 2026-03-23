@@ -7,6 +7,11 @@ describe('mapModelName', () => {
     expect(mapModelName('claude-opus-4-5')).toBe('claude-opus-4.5')
   })
 
+  it('maps 1M context variants', () => {
+    expect(mapModelName('claude-opus-4-6-1m')).toBe('claude-opus-4.6-1m')
+    expect(mapModelName('claude-sonnet-4-6-1m')).toBe('claude-sonnet-4.6-1m')
+  })
+
   it('maps known sonnet models', () => {
     expect(mapModelName('claude-sonnet-4-6')).toBe('claude-sonnet-4.6')
     expect(mapModelName('claude-sonnet-4-5')).toBe('claude-sonnet-4.5')
@@ -28,6 +33,11 @@ describe('mapModelName', () => {
     expect(mapModelName('claude-opus-5-0')).toBe('claude-opus-5.0')
     expect(mapModelName('claude-sonnet-5-1')).toBe('claude-sonnet-5.1')
     expect(mapModelName('claude-haiku-5-2')).toBe('claude-haiku-5.2')
+  })
+
+  it('converts unknown claude-<family>-<major>-<minor>-1m pattern', () => {
+    expect(mapModelName('claude-opus-5-0-1m')).toBe('claude-opus-5.0-1m')
+    expect(mapModelName('claude-sonnet-5-1-1m')).toBe('claude-sonnet-5.1-1m')
   })
 
   it('passes through already-correct Copilot model IDs', () => {

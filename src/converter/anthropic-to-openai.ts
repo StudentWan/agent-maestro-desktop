@@ -4,10 +4,17 @@ import { convertToolsToOpenAI, convertToolChoiceToOpenAI } from "./tool-converte
 import type { AnthropicRequest, AnthropicMessage, AnthropicContentBlock } from "./types";
 
 /**
- * Convert an Anthropic Messages API request to a Copilot/OpenAI ChatCompletion request
+ * Convert an Anthropic Messages API request to a Copilot/OpenAI ChatCompletion request.
+ *
+ * When `headers` are provided, the `anthropic-beta` header is inspected for
+ * `context-1m` to resolve the correct 1M-context model variant.
  */
-export function convertAnthropicToOpenAI(request: AnthropicRequest): CopilotCompletionRequest {
-  const copilotModel = mapModelName(request.model);
+export function convertAnthropicToOpenAI(
+  request: AnthropicRequest,
+  headers?: Record<string, string | undefined>,
+): CopilotCompletionRequest {
+  const resolvedModel = resolveModelFromHeaders(request.model, headers);
+  const copilotModel = mapModelName(resolvedModel);
   const messages: CopilotMessage[] = [];
 
   // Convert system prompt to system message
@@ -180,4 +187,34 @@ function getToolResultContent(block: AnthropicContentBlock & { type: "tool_resul
       return JSON.stringify(c);
     })
     .join("\n");
+}
+
+/**
+ * Resolve the model ID based on the `anthropic-beta` header.
+ *
+ * Claude Code signals that it wants the 1M-context variant via the
+ * `anthropic-beta` header (e.g. `context-1m-2025-08-07`). The Copilot LM API
+ * exposes these as separate model IDs (e.g. `claude-opus-4.6-1m`), so we
+ * append `-1m` when the beta header is present.
+ *
+ * This function is idempotent: if the model already ends with `-1m`, it is
+ * returned unchanged.
+ */
+function resolveModelFromHeaders(
+  model: string,
+  headers?: Record<string, string | undefined>,
+): string {
+  if (!headers) {
+    return model;
+  }
+
+  const betaHeader = headers["anthropic-beta"];
+  if (betaHeader && /\bcontext-1m\b/.test(betaHeader)) {
+    if (model.endsWith("-1m")) {
+      return model;
+    }
+    return `${model}-1m`;
+  }
+
+  return model;
 }
