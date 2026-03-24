@@ -48,6 +48,26 @@ const api = {
     ipcRenderer.on("proxy:request-log", listener);
     return () => ipcRenderer.removeListener("proxy:request-log", listener);
   },
+
+  // Codespace
+  codespace: {
+    checkGhCli: () => ipcRenderer.invoke("codespace:check-gh-cli" satisfies IpcChannels),
+    list: () => ipcRenderer.invoke("codespace:list" satisfies IpcChannels),
+    connect: (name: string) => ipcRenderer.invoke("codespace:connect" satisfies IpcChannels, name),
+    disconnect: (name: string) => ipcRenderer.invoke("codespace:disconnect" satisfies IpcChannels, name),
+    disconnectAll: () => ipcRenderer.invoke("codespace:disconnect-all" satisfies IpcChannels),
+    getConnections: () => ipcRenderer.invoke("codespace:get-connections" satisfies IpcChannels),
+    onStatusChanged: (callback: (connection: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, connection: unknown) => callback(connection);
+      ipcRenderer.on("codespace:status-changed", listener);
+      return () => ipcRenderer.removeListener("codespace:status-changed", listener);
+    },
+    onError: (callback: (error: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, error: unknown) => callback(error);
+      ipcRenderer.on("codespace:connection-error", listener);
+      return () => ipcRenderer.removeListener("codespace:connection-error", listener);
+    },
+  },
 };
 
 export type CopilotBridgeAPI = typeof api;
