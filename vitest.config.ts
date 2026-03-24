@@ -9,6 +9,7 @@ export default defineConfig({
       '@converter': path.resolve(__dirname, 'src/converter'),
       '@proxy': path.resolve(__dirname, 'src/proxy'),
       '@store': path.resolve(__dirname, 'src/store'),
+      '@codespace': path.resolve(__dirname, 'src/codespace'),
     },
   },
   test: {
@@ -25,6 +26,7 @@ export default defineConfig({
         'src/copilot/**/*.ts',
         'src/proxy/**/*.ts',
         'src/shared/**/*.ts',
+        'src/codespace/**/*.ts',
       ],
       exclude: [
         'src/**/__tests__/**',

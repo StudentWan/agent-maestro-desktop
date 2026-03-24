@@ -11,10 +11,18 @@ export type IpcChannels =
   | "models:get-selected"
   | "models:set-selected"
   | "settings:get-auto-start"
-  | "settings:set-auto-start";
+  | "settings:set-auto-start"
+  | "codespace:check-gh-cli"
+  | "codespace:list"
+  | "codespace:connect"
+  | "codespace:disconnect"
+  | "codespace:disconnect-all"
+  | "codespace:get-connections";
 
 export type IpcEvents =
   | "auth:status-changed"
   | "proxy:status-changed"
   | "token:info-changed"
-  | "proxy:request-log";
+  | "proxy:request-log"
+  | "codespace:status-changed"
+  | "codespace:connection-error";

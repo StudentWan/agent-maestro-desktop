@@ -25,3 +25,11 @@ export const APP_USER_AGENT = "GitHubCopilotChat/0.24.2";
 export const EDITOR_VERSION = "vscode/1.99.0";
 export const EDITOR_PLUGIN_VERSION = "copilot-chat/0.24.2";
 export const MACHINE_ID = "machine-id-placeholder";
+
+// Codespace
+export const CODESPACE_HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+export const CODESPACE_LIST_POLL_INTERVAL_MS = 60_000; // 60 seconds
+export const SSH_TUNNEL_CONNECT_TIMEOUT_MS = 30_000; // 30 seconds
+export const REMOTE_COMMAND_TIMEOUT_MS = 15_000; // 15 seconds
+export const MAX_RECONNECT_ATTEMPTS = 5;
+export const MAX_PORT_RETRIES = 3;

@@ -19,7 +19,8 @@
       "@copilot/*": ["./src/copilot/*"],
       "@converter/*": ["./src/converter/*"],
       "@proxy/*": ["./src/proxy/*"],
-      "@store/*": ["./src/store/*"]
+      "@store/*": ["./src/store/*"],
+      "@codespace/*": ["./src/codespace/*"]
     },
     "baseUrl": "."
   },
