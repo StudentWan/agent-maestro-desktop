@@ -8,11 +8,15 @@ import { ProxyServer } from "../proxy/server";
 import { getGithubToken, setGithubToken, getProxyPort, getAutoStart, setAutoStart, getSelectedModel, setSelectedModel } from "../store/app-store";
 import { applyClaudeConfig, removeClaudeConfig, writeModelToClaudeConfig } from "./claude-config";
 import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry, ModelInfo } from "../shared/types";
+import { CodespaceManager } from "../codespace/codespace-manager";
+import { checkGhCli } from "../codespace/gh-cli";
+import type { CodespaceConnection, CodespaceInfo, GhCliStatus } from "../codespace/types";
 
 let tokenManager: TokenManager | null = null;
 let copilotClient: CopilotClient | null = null;
 let proxyServer: ProxyServer | null = null;
 let username: string | null = null;
+let codespaceManager: CodespaceManager | null = null;
 
 function getMainWindow(): BrowserWindow | null {
   const windows = BrowserWindow.getAllWindows();
@@ -39,6 +43,22 @@ function getProxyStatus(): ProxyStatus {
     port: proxyServer?.getPort() ?? getProxyPort(),
     requestCount: proxyServer?.getRequestCount() ?? 0,
   };
+}
+
+function getOrCreateCodespaceManager(): CodespaceManager {
+  if (!codespaceManager) {
+    const port = proxyServer?.getPort() ?? getProxyPort();
+    codespaceManager = new CodespaceManager(port);
+
+    codespaceManager.on("connectionChanged", (connection: CodespaceConnection) => {
+      sendToRenderer("codespace:status-changed", connection);
+    });
+
+    codespaceManager.on("connectionError", (error: { name: string; message: string }) => {
+      sendToRenderer("codespace:connection-error", error);
+    });
+  }
+  return codespaceManager;
 }
 
 /**
@@ -287,12 +307,18 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle("models:set-selected" satisfies IpcChannels, async (_event, modelId: string) => {
     setSelectedModel(modelId);
-    // Write model to Claude config
+    // Write model to local Claude config
     try {
       await writeModelToClaudeConfig(modelId);
       console.log(`[IPC] Model set to: ${modelId}`);
     } catch (error) {
       console.error("[IPC] Failed to write model to Claude config:", error);
+    }
+    // Propagate to connected Codespaces
+    if (codespaceManager) {
+      codespaceManager.updateModel(modelId).catch((err) => {
+        console.error("[IPC] Failed to update model in Codespaces:", err);
+      });
     }
     return modelId;
   });
@@ -310,9 +336,60 @@ export function registerIpcHandlers(): void {
     }
     return enabled;
   });
+
+  // --- Codespace handlers ---
+
+  ipcMain.handle("codespace:check-gh-cli" satisfies IpcChannels, async (): Promise<GhCliStatus> => {
+    return checkGhCli();
+  });
+
+  ipcMain.handle("codespace:list" satisfies IpcChannels, async (): Promise<CodespaceInfo[]> => {
+    const manager = getOrCreateCodespaceManager();
+    return manager.list();
+  });
+
+  ipcMain.handle("codespace:connect" satisfies IpcChannels, async (_event, name: string): Promise<CodespaceConnection> => {
+    // Ensure proxy is running before connecting
+    await ensureProxyRunning();
+
+    const manager = getOrCreateCodespaceManager();
+    const codespaces = await manager.list();
+    const info = codespaces.find((cs) => cs.name === name);
+    if (!info) {
+      throw new Error(`Codespace "${name}" not found`);
+    }
+    const model = getSelectedModel() ?? "";
+
+    // If Codespace is Shutdown, start it first
+    if (info.state === "Shutdown") {
+      return manager.startAndConnect(info, model);
+    }
+
+    return manager.connect(info, model);
+  });
+
+  ipcMain.handle("codespace:disconnect" satisfies IpcChannels, async (_event, name: string): Promise<void> => {
+    const manager = getOrCreateCodespaceManager();
+    await manager.disconnect(name);
+  });
+
+  ipcMain.handle("codespace:disconnect-all" satisfies IpcChannels, async (): Promise<void> => {
+    const manager = getOrCreateCodespaceManager();
+    await manager.disconnectAll();
+  });
+
+  ipcMain.handle("codespace:get-connections" satisfies IpcChannels, (): CodespaceConnection[] => {
+    const manager = getOrCreateCodespaceManager();
+    return manager.getConnections();
+  });
 }
 
 export function cleanup(): void {
+  // Kill all SSH tunnel processes synchronously (best-effort)
+  if (codespaceManager) {
+    codespaceManager.killAllTunnels();
+    codespaceManager = null;
+  }
   tokenManager?.dispose();
   if (proxyServer?.isRunning()) {
     proxyServer.stop();
