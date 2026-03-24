@@ -6,6 +6,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import RequestLog from "./components/RequestLog";
 import ConfigPanel from "./components/ConfigPanel";
 import StatusBar from "./components/StatusBar";
+import CodespacePanel from "./components/CodespacePanel";
 import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry } from "../shared/types";
 import type { CopilotBridgeAPI } from "../preload";
 
@@ -101,6 +102,8 @@ export default function App() {
           <ModelSelector authenticated={authStatus.authenticated} />
           <SettingsPanel />
         </div>
+
+        <CodespacePanel authenticated={authStatus.authenticated} />
 
         {config && proxyStatus.running && (
           <ConfigPanel config={config} />
