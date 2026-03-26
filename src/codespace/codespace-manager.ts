@@ -126,16 +126,8 @@ export class CodespaceManager extends EventEmitter {
       throw new Error("Failed to find available port after retries");
     }
 
-    // Configure remote Claude Code
-    try {
-      console.log(`[CodespaceManager] Writing remote config: ANTHROPIC_BASE_URL=http://127.0.0.1:${remotePort}`);
-      await executeRemoteCommand(info.name, buildWriteConfigScript(remotePort, model));
-      await executeRemoteCommand(info.name, buildWriteOnboardingScript());
-      console.log(`[CodespaceManager] Remote config written successfully for ${info.name}`);
-    } catch (err) {
-      console.warn(`[CodespaceManager] Remote config write failed for ${info.name}:`, err);
-      // Non-fatal — tunnel is still up
-    }
+    // Configure remote Claude Code (with retry — first SSH connection may be slow)
+    await this.writeRemoteConfig(info.name, remotePort, model);
 
     // Setup reconnect handler
     tunnel.on("unexpectedExit", () => {
@@ -160,6 +152,38 @@ export class CodespaceManager extends EventEmitter {
     );
 
     return { ...connection };
+  }
+
+  /**
+   * Write remote Claude Code config with retry.
+   * The first `gh codespace ssh` invocation is slow because it establishes
+   * an SSH connection from scratch. Retries with increasing delays.
+   */
+  private async writeRemoteConfig(name: string, port: number, model: string): Promise<void> {
+    const maxAttempts = 3;
+    const delays = [0, 5_000, 10_000]; // 0s, 5s, 10s
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        console.log(`[CodespaceManager] Retrying remote config write for ${name} (attempt ${attempt + 1}/${maxAttempts})...`);
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+
+      try {
+        console.log(`[CodespaceManager] Writing remote config: ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`);
+        await executeRemoteCommand(name, buildWriteConfigScript(port, model));
+        await executeRemoteCommand(name, buildWriteOnboardingScript());
+        console.log(`[CodespaceManager] Remote config written successfully for ${name}`);
+        return;
+      } catch (err) {
+        const isLastAttempt = attempt === maxAttempts - 1;
+        if (isLastAttempt) {
+          console.warn(`[CodespaceManager] Remote config write failed after ${maxAttempts} attempts for ${name}:`, err);
+        } else {
+          console.warn(`[CodespaceManager] Remote config write attempt ${attempt + 1} failed for ${name}, will retry`);
+        }
+      }
+    }
   }
 
   async disconnect(name: string): Promise<void> {
@@ -272,7 +296,7 @@ export class CodespaceManager extends EventEmitter {
       await tunnel.connect();
 
       try {
-        await executeRemoteCommand(name, buildWriteConfigScript(newPort, model));
+        await this.writeRemoteConfig(name, newPort, model);
       } catch {
         // Non-fatal
       }

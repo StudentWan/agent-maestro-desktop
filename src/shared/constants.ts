@@ -30,7 +30,7 @@ export const MACHINE_ID = "machine-id-placeholder";
 export const CODESPACE_HEALTH_CHECK_INTERVAL_MS = 60_000; // 60 seconds (reduced from 30s to avoid overloading SSH)
 export const CODESPACE_LIST_POLL_INTERVAL_MS = 60_000; // 60 seconds
 export const SSH_TUNNEL_CONNECT_TIMEOUT_MS = 30_000; // 30 seconds
-export const REMOTE_COMMAND_TIMEOUT_MS = 15_000; // 15 seconds
+export const REMOTE_COMMAND_TIMEOUT_MS = 60_000; // 60 seconds (gh codespace ssh needs time to establish SSH)
 export const MAX_RECONNECT_ATTEMPTS = 5;
 export const MAX_PORT_RETRIES = 3;
 
