@@ -1,0 +1,22 @@
+{
+  "windowsState": {
+    "lastActiveWindow": {
+      "folder": "vscode-remote://ssh-remote+my-server/home/user/project",
+      "remoteAuthority": "ssh-remote+my-server"
+    },
+    "openedWindows": [
+      {
+        "folder": "vscode-remote://codespaces%2Bfluffy-potato-abc123/workspaces/repo",
+        "remoteAuthority": "codespaces+fluffy-potato-abc123"
+      },
+      {
+        "folder": "vscode-remote://dev-container%2B7890/workspace",
+        "remoteAuthority": "dev-container+7890"
+      },
+      {
+        "folder": "vscode-remote://attached-container%2Bcontainer-name/app",
+        "remoteAuthority": "attached-container+container-name"
+      }
+    ]
+  }
+}

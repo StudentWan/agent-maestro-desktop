@@ -33,3 +33,7 @@ export const SSH_TUNNEL_CONNECT_TIMEOUT_MS = 30_000; // 30 seconds
 export const REMOTE_COMMAND_TIMEOUT_MS = 15_000; // 15 seconds
 export const MAX_RECONNECT_ATTEMPTS = 5;
 export const MAX_PORT_RETRIES = 3;
+
+// Codespace auto-detection
+export const VSCODE_DETECTOR_DEBOUNCE_MS = 1500;
+export const VSCODE_DETECTOR_POLL_INTERVAL_MS = 10_000; // 10 seconds

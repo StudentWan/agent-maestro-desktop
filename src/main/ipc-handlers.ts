@@ -9,14 +9,19 @@ import { getGithubToken, setGithubToken, getProxyPort, getAutoStart, setAutoStar
 import { applyClaudeConfig, removeClaudeConfig, writeModelToClaudeConfig } from "./claude-config";
 import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry, ModelInfo } from "../shared/types";
 import { CodespaceManager } from "../codespace/codespace-manager";
-import { checkGhCli } from "../codespace/gh-cli";
-import type { CodespaceConnection, CodespaceInfo, GhCliStatus } from "../codespace/types";
+import { checkGhCli, hasCodespaceScope } from "../codespace/gh-cli";
+import { AutoConnectOrchestrator } from "../codespace/auto-connect-orchestrator";
+import { VscodeDetector } from "../codespace/vscode-detector";
+import { getVscodeStoragePath } from "../codespace/vscode-storage-path";
+import type { CodespaceConnection, CodespaceInfo, GhCliStatus, AutoConnectConfig, AutoDetectState } from "../codespace/types";
+import * as fs from "node:fs";
 
 let tokenManager: TokenManager | null = null;
 let copilotClient: CopilotClient | null = null;
 let proxyServer: ProxyServer | null = null;
 let username: string | null = null;
 let codespaceManager: CodespaceManager | null = null;
+let autoConnectOrchestrator: AutoConnectOrchestrator | null = null;
 
 function getMainWindow(): BrowserWindow | null {
   const windows = BrowserWindow.getAllWindows();
@@ -59,6 +64,63 @@ function getOrCreateCodespaceManager(): CodespaceManager {
     });
   }
   return codespaceManager;
+}
+
+function getOrCreateAutoConnectOrchestrator(): AutoConnectOrchestrator {
+  if (autoConnectOrchestrator) return autoConnectOrchestrator;
+
+  const storagePath = getVscodeStoragePath();
+  const detector = new VscodeDetector({
+    readFile: (p) => fs.promises.readFile(p, "utf-8"),
+    watchFile: (p, cb) => {
+      const watcher = fs.watch(p, { persistent: false }, cb);
+      return { close: () => watcher.close() };
+    },
+    fileExists: (p) => fs.promises.access(p).then(() => true, () => false),
+    storagePath,
+  });
+
+  const csManager = getOrCreateCodespaceManager();
+
+  autoConnectOrchestrator = new AutoConnectOrchestrator({
+    detector,
+    connectCodespace: async (name: string) => {
+      await ensureProxyRunning();
+      const codespaces = await csManager.list();
+      const info = codespaces.find((cs) => cs.name === name);
+      if (!info) {
+        throw new Error(`Codespace "${name}" not found via gh API`);
+      }
+      const model = getSelectedModel() ?? "";
+      if (info.state === "Shutdown") {
+        await csManager.startAndConnect(info, model);
+      } else {
+        await csManager.connect(info, model);
+      }
+    },
+    disconnectCodespace: (name: string) => csManager.disconnect(name),
+    isCodespaceConnected: (name: string) =>
+      csManager.getConnections().some(
+        (c) => c.id === name && c.connectionState === "connected",
+      ),
+    checkCodespaceScope: hasCodespaceScope,
+  });
+
+  // Forward auto-detect events to renderer
+  autoConnectOrchestrator.on("auto-connected", (cs) => {
+    sendToRenderer("codespace:auto-connected", cs);
+  });
+  autoConnectOrchestrator.on("auto-disconnected", (name) => {
+    sendToRenderer("codespace:auto-disconnected", name);
+  });
+  autoConnectOrchestrator.on("scope-required", (cs) => {
+    sendToRenderer("codespace:scope-required", cs);
+  });
+  autoConnectOrchestrator.on("auto-connect-error", (name, error) => {
+    sendToRenderer("codespace:auto-connect-error", { name, message: String(error) });
+  });
+
+  return autoConnectOrchestrator;
 }
 
 /**
@@ -382,9 +444,46 @@ export function registerIpcHandlers(): void {
     const manager = getOrCreateCodespaceManager();
     return manager.getConnections();
   });
+
+  // --- Codespace Auto-Detection handlers ---
+
+  ipcMain.handle("codespace:start-auto-detect" satisfies IpcChannels, async (): Promise<void> => {
+    const orchestrator = getOrCreateAutoConnectOrchestrator();
+    await orchestrator.start();
+  });
+
+  ipcMain.handle("codespace:stop-auto-detect" satisfies IpcChannels, (): void => {
+    if (autoConnectOrchestrator) {
+      autoConnectOrchestrator.stop();
+    }
+  });
+
+  ipcMain.handle("codespace:get-auto-detect-state" satisfies IpcChannels, (): AutoDetectState => {
+    const orchestrator = getOrCreateAutoConnectOrchestrator();
+    return orchestrator.getState();
+  });
+
+  ipcMain.handle(
+    "codespace:set-auto-connect-config" satisfies IpcChannels,
+    (_event, config: Partial<AutoConnectConfig>): AutoConnectConfig => {
+      const orchestrator = getOrCreateAutoConnectOrchestrator();
+      return orchestrator.updateConfig(config);
+    },
+  );
+
+  ipcMain.handle("codespace:retry-scope-connections" satisfies IpcChannels, async (): Promise<void> => {
+    if (autoConnectOrchestrator) {
+      await autoConnectOrchestrator.retryPendingConnections();
+    }
+  });
 }
 
 export function cleanup(): void {
+  // Stop auto-detection
+  if (autoConnectOrchestrator) {
+    autoConnectOrchestrator.stop();
+    autoConnectOrchestrator = null;
+  }
   // Kill all SSH tunnel processes synchronously (best-effort)
   if (codespaceManager) {
     codespaceManager.killAllTunnels();

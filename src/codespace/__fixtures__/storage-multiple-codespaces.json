@@ -1,0 +1,17 @@
+{
+  "windowsState": {
+    "lastActiveWindow": {
+      "folder": "vscode-remote://codespaces%2Bfluffy-potato-abc123/workspaces/repo1",
+      "remoteAuthority": "codespaces+fluffy-potato-abc123"
+    },
+    "openedWindows": [
+      {
+        "folder": "vscode-remote://codespaces%2Bcurly-umbrella-xyz789/workspaces/repo2",
+        "remoteAuthority": "codespaces+curly-umbrella-xyz789"
+      },
+      {
+        "folder": "file:///home/user/projects/local-project"
+      }
+    ]
+  }
+}

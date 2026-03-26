@@ -68,6 +68,42 @@ const api = {
       return () => ipcRenderer.removeListener("codespace:connection-error", listener);
     },
   },
+
+  // Codespace Auto-Detection
+  autoDetect: {
+    start: () => ipcRenderer.invoke("codespace:start-auto-detect" satisfies IpcChannels),
+    stop: () => ipcRenderer.invoke("codespace:stop-auto-detect" satisfies IpcChannels),
+    getState: () => ipcRenderer.invoke("codespace:get-auto-detect-state" satisfies IpcChannels),
+    setConfig: (config: Record<string, unknown>) =>
+      ipcRenderer.invoke("codespace:set-auto-connect-config" satisfies IpcChannels, config),
+    retryScopeConnections: () =>
+      ipcRenderer.invoke("codespace:retry-scope-connections" satisfies IpcChannels),
+    onAutoDetected: (callback: (codespace: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, codespace: unknown) => callback(codespace);
+      ipcRenderer.on("codespace:auto-detected", listener);
+      return () => ipcRenderer.removeListener("codespace:auto-detected", listener);
+    },
+    onAutoConnected: (callback: (codespace: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, codespace: unknown) => callback(codespace);
+      ipcRenderer.on("codespace:auto-connected", listener);
+      return () => ipcRenderer.removeListener("codespace:auto-connected", listener);
+    },
+    onAutoDisconnected: (callback: (name: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, name: unknown) => callback(name);
+      ipcRenderer.on("codespace:auto-disconnected", listener);
+      return () => ipcRenderer.removeListener("codespace:auto-disconnected", listener);
+    },
+    onScopeRequired: (callback: (codespace: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, codespace: unknown) => callback(codespace);
+      ipcRenderer.on("codespace:scope-required", listener);
+      return () => ipcRenderer.removeListener("codespace:scope-required", listener);
+    },
+    onAutoConnectError: (callback: (error: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, error: unknown) => callback(error);
+      ipcRenderer.on("codespace:auto-connect-error", listener);
+      return () => ipcRenderer.removeListener("codespace:auto-connect-error", listener);
+    },
+  },
 };
 
 export type CopilotBridgeAPI = typeof api;

@@ -17,7 +17,12 @@ export type IpcChannels =
   | "codespace:connect"
   | "codespace:disconnect"
   | "codespace:disconnect-all"
-  | "codespace:get-connections";
+  | "codespace:get-connections"
+  | "codespace:start-auto-detect"
+  | "codespace:stop-auto-detect"
+  | "codespace:get-auto-detect-state"
+  | "codespace:set-auto-connect-config"
+  | "codespace:retry-scope-connections";
 
 export type IpcEvents =
   | "auth:status-changed"
@@ -25,4 +30,9 @@ export type IpcEvents =
   | "token:info-changed"
   | "proxy:request-log"
   | "codespace:status-changed"
-  | "codespace:connection-error";
+  | "codespace:connection-error"
+  | "codespace:auto-detected"
+  | "codespace:auto-connected"
+  | "codespace:auto-disconnected"
+  | "codespace:scope-required"
+  | "codespace:auto-connect-error";

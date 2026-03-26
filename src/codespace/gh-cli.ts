@@ -6,11 +6,12 @@ import { MIN_GH_CLI_VERSION } from "./types";
 function execFilePromise(
   cmd: string,
   args: string[],
-  options?: { timeout?: number },
+  options?: { timeout?: number; rejectOnError?: boolean },
 ): Promise<{ stdout: string; stderr: string }> {
+  const rejectOnError = options?.rejectOnError ?? true;
   return new Promise((resolve, reject) => {
     execFileCb(cmd, args, { timeout: options?.timeout }, (error, stdout, stderr) => {
-      if (error) {
+      if (error && rejectOnError) {
         reject(error);
         return;
       }
@@ -55,9 +56,16 @@ export async function checkGhCli(): Promise<GhCliStatus> {
   }
 
   try {
-    const { stdout } = await execFilePromise("gh", ["auth", "status"]);
-    result.authenticated = stdout.includes("Logged in");
-    result.hasCodespaceScope = stdout.includes("codespace");
+    // gh auth status outputs to stdout in newer versions and stderr in older ones.
+    // It also returns a non-zero exit code when not authenticated, so we must
+    // capture output even on failure.
+    const { stdout, stderr } = await execFilePromise(
+      "gh", ["auth", "status"],
+      { rejectOnError: false },
+    );
+    const combined = `${stdout}\n${stderr}`;
+    result.authenticated = combined.includes("Logged in");
+    result.hasCodespaceScope = combined.includes("codespace");
   } catch {
     result.authenticated = false;
   }
@@ -127,4 +135,21 @@ export async function executeRemoteCommand(
     "--", command,
   ], { timeout: timeoutMs });
   return stdout;
+}
+
+/**
+ * Check if the authenticated gh user has the "codespace" OAuth scope.
+ * Returns false on any error (gh not installed, not logged in, etc.)
+ */
+export async function hasCodespaceScope(): Promise<boolean> {
+  try {
+    const { stdout, stderr } = await execFilePromise(
+      "gh", ["auth", "status"],
+      { rejectOnError: false },
+    );
+    const combined = `${stdout}\n${stderr}`;
+    return combined.includes("codespace");
+  } catch {
+    return false;
+  }
 }
