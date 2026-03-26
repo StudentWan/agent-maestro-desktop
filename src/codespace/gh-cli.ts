@@ -115,9 +115,11 @@ export function spawnSshTunnel(
     "codespace", "ssh",
     "--codespace", codespaceName,
     "--",
+    "-v",
     "-R", `${remotePort}:127.0.0.1:${localPort}`,
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
+    "-o", "ExitOnForwardFailure=yes",
     "-N",
   ], {
     stdio: ["ignore", "pipe", "pipe"],

@@ -4,6 +4,17 @@ import { spawnSshTunnel } from "./gh-cli";
 import { SSH_TUNNEL_CONNECT_TIMEOUT_MS } from "../shared/constants";
 import type { CodespaceConnectionState } from "./types";
 
+/**
+ * Patterns in SSH verbose (-v) output that indicate the tunnel is established.
+ * The "Entering interactive session" or "pledge: " lines appear after auth + channel setup.
+ */
+const SSH_CONNECTED_PATTERNS = [
+  "Entering interactive session",
+  "pledge: ",
+  "remote forward success",
+  "forwarding_success",
+] as const;
+
 export class SshTunnel extends EventEmitter {
   private process: ChildProcess | null = null;
   private state: CodespaceConnectionState = "available";
@@ -29,10 +40,31 @@ export class SshTunnel extends EventEmitter {
 
     this.process.stderr?.on("data", (data: Buffer) => {
       const msg = data.toString();
-      console.log(`[SSHTunnel:${this.codespaceName}] stderr: ${msg.trim()}`);
+
+      // Only log non-debug lines at full level; verbose SSH debug is noisy
+      const lines = msg.split("\n").filter((l) => l.trim());
+      for (const line of lines) {
+        if (line.startsWith("debug1:")) {
+          // Suppress verbose debug output unless it contains key info
+          if (this.isKeyDebugLine(line)) {
+            console.log(`[SSHTunnel:${this.codespaceName}] ${line.trim()}`);
+          }
+        } else {
+          console.log(`[SSHTunnel:${this.codespaceName}] stderr: ${line.trim()}`);
+        }
+      }
 
       if (msg.includes("bind: Address already in use")) {
         this.emit("portConflict", this.remotePort);
+      }
+
+      // Detect actual connection establishment from SSH verbose output
+      if (this.state === "connecting") {
+        const connected = SSH_CONNECTED_PATTERNS.some((p) => msg.includes(p));
+        if (connected) {
+          console.log(`[SSHTunnel:${this.codespaceName}] Tunnel established (detected from SSH output)`);
+          this.markConnected();
+        }
       }
     });
 
@@ -59,7 +91,9 @@ export class SshTunnel extends EventEmitter {
     return new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
         // If process is still running after timeout, consider it connected
-        if (this.process && !this.process.killed) {
+        // (fallback if we missed the verbose output pattern)
+        if (this.process && !this.process.killed && this.state === "connecting") {
+          console.log(`[SSHTunnel:${this.codespaceName}] Timeout reached, assuming connected (process still running)`);
           this.markConnected();
         }
         resolve();
@@ -82,8 +116,10 @@ export class SshTunnel extends EventEmitter {
   }
 
   markConnected(): void {
-    this.setState("connected");
-    this.emit("_manualConnect");
+    if (this.state !== "connected") {
+      this.setState("connected");
+      this.emit("_manualConnect");
+    }
   }
 
   disconnect(): void {
@@ -97,6 +133,18 @@ export class SshTunnel extends EventEmitter {
 
   isConnected(): boolean {
     return this.state === "connected" && this.process !== null;
+  }
+
+  private isKeyDebugLine(line: string): boolean {
+    return (
+      line.includes("remote forward") ||
+      line.includes("Entering interactive") ||
+      line.includes("pledge:") ||
+      line.includes("Authentication succeeded") ||
+      line.includes("Connection to") ||
+      line.includes("channel") ||
+      line.includes("forwarding_success")
+    );
   }
 
   private setState(state: CodespaceConnectionState): void {

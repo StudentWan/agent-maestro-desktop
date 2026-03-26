@@ -128,8 +128,10 @@ export class CodespaceManager extends EventEmitter {
 
     // Configure remote Claude Code
     try {
+      console.log(`[CodespaceManager] Writing remote config: ANTHROPIC_BASE_URL=http://127.0.0.1:${remotePort}`);
       await executeRemoteCommand(info.name, buildWriteConfigScript(remotePort, model));
       await executeRemoteCommand(info.name, buildWriteOnboardingScript());
+      console.log(`[CodespaceManager] Remote config written successfully for ${info.name}`);
     } catch (err) {
       console.warn(`[CodespaceManager] Remote config write failed for ${info.name}:`, err);
       // Non-fatal — tunnel is still up
@@ -152,6 +154,10 @@ export class CodespaceManager extends EventEmitter {
 
     this.connections.set(info.name, { connection, tunnel, healthTimer });
     this.emitConnection(connection);
+
+    console.log(
+      `[CodespaceManager] Connected to ${info.name}: tunnel ${remotePort}(remote) → ${localPort}(local/proxy)`,
+    );
 
     return { ...connection };
   }
@@ -213,13 +219,18 @@ export class CodespaceManager extends EventEmitter {
     const entry = this.connections.get(name);
     if (!entry || entry.connection.connectionState !== "connected") return;
 
+    // Health check: curl the proxy through the reverse tunnel.
+    // The remote port forwards to the local proxy, so we curl remotePort
+    // on the codespace side which traverses the tunnel to our local proxy's /health.
     try {
       await executeRemoteCommand(
         name,
-        `curl -sf http://127.0.0.1:${entry.connection.remotePort}/health`,
+        `curl -sf --max-time 5 http://127.0.0.1:${entry.connection.remotePort}/health`,
       );
     } catch {
-      console.warn(`[CodespaceManager] Health check failed for ${name}`);
+      // Health check failure is informational only — do NOT trigger reconnect.
+      // The SSH process exit handler manages reconnection when the tunnel truly drops.
+      console.warn(`[CodespaceManager] Health check failed for ${name} (port ${entry.connection.remotePort})`);
     }
 
     const updated = updateConnection(entry.connection, { lastHealthCheck: Date.now() });
