@@ -58,6 +58,7 @@ export interface RequestLogEntry {
   outputTokens?: number;
   stream: boolean;
   error?: string;
+  source: "local" | "codespace";
 }
 
 // Config

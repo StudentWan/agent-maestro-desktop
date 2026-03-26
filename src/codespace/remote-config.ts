@@ -33,6 +33,8 @@ cfg['env']['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:${port}'
 cfg['env']['ANTHROPIC_AUTH_TOKEN'] = 'Powered by Agent Maestro Desktop'
 cfg['env']['ANTHROPIC_MODEL'] = '${safeModel}'
 cfg['env']['AGENT_MAESTRO_MANAGED'] = 'true'
+cfg.setdefault('apiHeaders', {})
+cfg['apiHeaders']['x-agent-maestro-source'] = 'codespace'
 json.dump(cfg, open(p, 'w'), indent=2)
 "`;
 }
@@ -74,6 +76,7 @@ for key in ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL', 'AG
     env.pop(key, None)
 if not env:
     cfg.pop('env', None)
+cfg.pop('apiHeaders', None)
 json.dump(cfg, open(p, 'w'), indent=2)
 "`;
 }

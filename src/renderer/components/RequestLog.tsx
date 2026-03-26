@@ -42,6 +42,7 @@ export default function RequestLog({ logs }: Props) {
           <thead>
             <tr className="text-gray-400 border-b border-gray-700">
               <th className="text-left py-2 pr-4">Time</th>
+              <th className="text-left py-2 pr-4">Source</th>
               <th className="text-left py-2 pr-4">Model</th>
               <th className="text-left py-2 pr-4">Status</th>
               <th className="text-left py-2 pr-4">Duration</th>
@@ -53,6 +54,17 @@ export default function RequestLog({ logs }: Props) {
               <tr key={log.id} className="border-b border-gray-700/50 hover:bg-gray-700/30">
                 <td className="py-2 pr-4 font-mono text-xs">
                   {new Date(log.timestamp).toLocaleTimeString()}
+                </td>
+                <td className="py-2 pr-4">
+                  <span
+                    className={`text-xs font-mono px-1.5 py-0.5 rounded ${
+                      log.source === "codespace"
+                        ? "bg-purple-900/40 text-purple-300"
+                        : "bg-blue-900/40 text-blue-300"
+                    }`}
+                  >
+                    {log.source === "codespace" ? "Codespace" : "Local"}
+                  </span>
                 </td>
                 <td className="py-2 pr-4 font-mono text-xs">{log.model}</td>
                 <td className="py-2 pr-4">
