@@ -7,9 +7,9 @@ import path from "path";
 
 /**
  * afterCopy hook: remove "type": "module" from the packaged package.json
- * so Electron loads the CJS bundle (.vite/build/index.js) correctly.
- *
- * Source package.json keeps "type": "module" for Vitest compatibility.
+ * as a safety net. With .cjs output, this is technically unnecessary,
+ * but kept for robustness in case any module resolution falls back to
+ * the nearest package.json.
  */
 const removeTypeModule: ForgeConfig["packagerConfig"]["afterCopy"] = [
   (buildPath: string, _electronVersion: string, _platform: string, _arch: string, callback: (err?: Error | null) => void) => {

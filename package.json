@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "Desktop app that proxies Anthropic API requests through GitHub Copilot, inspired by agent-maestro",
   "author": "StudentWan",
-  "main": ".vite/build/index.js",
+  "main": ".vite/build/index.cjs",
   "scripts": {
     "start": "electron-forge start",
     "package": "electron-forge package",
