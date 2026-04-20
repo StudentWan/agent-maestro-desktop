@@ -10,9 +10,11 @@
 const MODEL_MAP: Record<string, string> = {
   // Opus
   "claude-opus-4-6": "claude-opus-4.6",
+  "claude-opus-4-6-1m": "claude-opus-4.6-1m",
   "claude-opus-4-5": "claude-opus-4.5",
   // Sonnet
   "claude-sonnet-4-6": "claude-sonnet-4.6",
+  "claude-sonnet-4-6-1m": "claude-sonnet-4.6-1m",
   "claude-sonnet-4-5": "claude-sonnet-4.5",
   "claude-sonnet-4-20250514": "claude-sonnet-4",
   // Haiku
@@ -42,10 +44,11 @@ export function mapModelName(anthropicModel: string): string {
     return MODEL_MAP[withoutDate];
   }
 
-  // 3. Generic pattern: "claude-<family>-<major>-<minor>" → "claude-<family>-<major>.<minor>"
-  const match = withoutDate.match(/^(claude-(?:opus|sonnet|haiku))-(\d+)-(\d+)$/);
+  // 3. Generic pattern: "claude-<family>-<major>-<minor>[-1m]" → "claude-<family>-<major>.<minor>[-1m]"
+  const match = withoutDate.match(/^(claude-(?:opus|sonnet|haiku))-(\d+)-(\d+)(?:-(1m))?$/);
   if (match) {
-    return `${match[1]}-${match[2]}.${match[3]}`;
+    const suffix = match[4] ? `-${match[4]}` : "";
+    return `${match[1]}-${match[2]}.${match[3]}${suffix}`;
   }
 
   // 4. Passthrough

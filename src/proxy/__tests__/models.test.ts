@@ -29,6 +29,18 @@ describe('models route', () => {
     expect(ids).toContain('claude-haiku-4-5-20251001')
   })
 
+  it('includes 1M context model variants', async () => {
+    const app = new Hono()
+    registerModelsRoutes(app)
+
+    const res = await app.request('/v1/models')
+    const body = await res.json()
+    const ids = body.data.map((m: any) => m.id)
+
+    expect(ids).toContain('claude-opus-4-6-1m')
+    expect(ids).toContain('claude-sonnet-4-6-1m')
+  })
+
   it('each model has required fields', async () => {
     const app = new Hono()
     registerModelsRoutes(app)

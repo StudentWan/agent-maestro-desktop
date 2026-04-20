@@ -45,7 +45,10 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
 
     try {
       // Convert Anthropic request → OpenAI/Copilot request
-      const openaiRequest = convertAnthropicToOpenAI(requestBody);
+      const headers: Record<string, string | undefined> = {
+        "anthropic-beta": c.req.header("anthropic-beta"),
+      };
+      const openaiRequest = convertAnthropicToOpenAI(requestBody, headers);
 
       if (isStream) {
         // --- Streaming ---

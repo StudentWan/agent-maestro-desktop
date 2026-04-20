@@ -97,7 +97,7 @@ describe('pollForAccessToken', () => {
     const catchPromise = promise.catch((e: Error) => e)
     await vi.advanceTimersByTimeAsync(100)
 
-    const error = await catchPromise
+    const error = await catchPromise as Error
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toContain('Device code expired')
   })
@@ -111,7 +111,7 @@ describe('pollForAccessToken', () => {
     const catchPromise = promise.catch((e: Error) => e)
     await vi.advanceTimersByTimeAsync(100)
 
-    const error = await catchPromise
+    const error = await catchPromise as Error
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toContain('Authorization was denied')
   })
@@ -125,7 +125,7 @@ describe('pollForAccessToken', () => {
     const catchPromise = promise.catch((e: Error) => e)
     await vi.advanceTimersByTimeAsync(100)
 
-    const error = await catchPromise
+    const error = await catchPromise as Error
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toContain('OAuth error: some_other_error')
   })
@@ -137,7 +137,7 @@ describe('pollForAccessToken', () => {
     const catchPromise = promise.catch((e: Error) => e)
     await vi.advanceTimersByTimeAsync(100)
 
-    const error = await catchPromise
+    const error = await catchPromise as Error
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toContain('Token polling failed')
   })

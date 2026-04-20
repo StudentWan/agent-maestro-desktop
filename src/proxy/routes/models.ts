@@ -14,7 +14,19 @@ export function registerModelsRoutes(app: Hono) {
         owned_by: "anthropic",
       },
       {
+        id: "claude-opus-4-6-1m",
+        object: "model",
+        created: Date.now(),
+        owned_by: "anthropic",
+      },
+      {
         id: "claude-sonnet-4-6",
+        object: "model",
+        created: Date.now(),
+        owned_by: "anthropic",
+      },
+      {
+        id: "claude-sonnet-4-6-1m",
         object: "model",
         created: Date.now(),
         owned_by: "anthropic",
