@@ -109,6 +109,7 @@ function ensureAutoBridgeRunning(): void {
   const manager = getOrCreateCodespaceManager();
   vscodeDetector = new VsCodeCodespaceDetector({
     getToken: () => getCodespaceToken() ?? undefined,
+    getExcludePids: () => manager.getOwnPids(),
   });
   autoBridge = new AutoBridgeOrchestrator(vscodeDetector, manager, {
     getModel: () => getSelectedModel() ?? "",
@@ -555,6 +556,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("codespace:disconnect-all" satisfies IpcChannels, async (): Promise<void> => {
     const manager = getOrCreateCodespaceManager();
     await manager.disconnectAll();
+  });
+
+  ipcMain.handle("codespace:dismiss" satisfies IpcChannels, (_event, name: string): void => {
+    const manager = getOrCreateCodespaceManager();
+    manager.dismiss(name);
   });
 
   ipcMain.handle("codespace:get-connections" satisfies IpcChannels, (): CodespaceConnection[] => {

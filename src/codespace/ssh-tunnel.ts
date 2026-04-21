@@ -107,6 +107,11 @@ export class SshTunnel extends EventEmitter {
     return this.state === "connected" && this.process !== null;
   }
 
+  /** PID of the SSH child process, or null when not running. */
+  getPid(): number | null {
+    return this.process?.pid ?? null;
+  }
+
   private setState(state: CodespaceConnectionState): void {
     this.state = state;
     this.emit("stateChanged", state);

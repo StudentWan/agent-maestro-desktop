@@ -19,6 +19,7 @@ export type IpcChannels =
   | "codespace:connect"
   | "codespace:disconnect"
   | "codespace:disconnect-all"
+  | "codespace:dismiss"
   | "codespace:get-connections";
 
 export type IpcEvents =

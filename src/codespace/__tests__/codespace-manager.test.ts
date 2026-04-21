@@ -212,7 +212,13 @@ describe("CodespaceManager", () => {
     );
     // Tunnel must have been torn down — leaving it would mislead the UI.
     expect(tunnelInstances[0].disconnect).toHaveBeenCalled();
-    expect(manager.getConnections()).toEqual([]);
+    // Error entry stays in the map so the UI can show Reconnect/Dismiss
+    // (without this, refresh() would drop the row and the bare "Connect"
+    // button would re-appear — the very race we wanted to avoid).
+    const conns = manager.getConnections();
+    expect(conns).toHaveLength(1);
+    expect(conns[0].connectionState).toBe("error");
+    expect(conns[0].errorCode).toBe("remote-config-failed");
   }, 30_000);
 
   it("connect() succeeds on retry when first attempt does not verify", async () => {
@@ -279,5 +285,221 @@ describe("CodespaceManager", () => {
     // it would have resurrected the stopped codespace.
     expect(executeRemoteCommand).not.toHaveBeenCalled();
     expect(manager.getConnections()).toEqual([]);
+  });
+
+  it("getConnections() includes the in-flight entry while connect() is still running", async () => {
+    // Regression: previously the manager only added the entry to its map
+    // at the end of connect(). A refresh() race during the SSH/config
+    // phase would call getConnections() and get [], wiping the row in
+    // the UI and briefly re-showing the bare "Connect" button.
+    const { SshTunnel } = await import("../ssh-tunnel");
+    const SshTunnelMock = SshTunnel as unknown as ReturnType<typeof vi.fn>;
+    let resolveTunnelConnect: (() => void) | null = null;
+    SshTunnelMock.mockImplementation(function () {
+      const { EventEmitter } = require("node:events");
+      const tunnel = new EventEmitter();
+      // Block tunnel.connect() so the test can poke getConnections()
+      // while connect() is still in-flight.
+      tunnel.connect = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveTunnelConnect = resolve;
+          }),
+      );
+      tunnel.disconnect = vi.fn();
+      tunnel.markConnected = vi.fn();
+      tunnel.isConnected = vi.fn().mockReturnValue(true);
+      tunnel.getState = vi.fn().mockReturnValue("connected");
+      return tunnel;
+    });
+
+    const csInfo = {
+      id: 1, name: "test-cs", displayName: "test-cs",
+      repository: "user/repo", state: "Available",
+      machine: "4-core", lastUsedAt: "2026-04-20T00:00:00Z",
+    };
+    vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
+
+    const manager = new CodespaceManager(23337, () => "tok");
+    const connectPromise = manager.connect(csInfo, "claude-opus");
+
+    // Yield once so the synchronous registration in connect() runs.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const midFlight = manager.getConnections();
+    expect(midFlight).toHaveLength(1);
+    expect(midFlight[0].connectionState).toBe("connecting");
+    expect(midFlight[0].id).toBe("test-cs");
+
+    // Let connect() finish so we don't leak a hanging promise.
+    (resolveTunnelConnect as unknown as () => void)?.();
+    await connectPromise;
+  });
+
+  it("emits progress phases in order during connect()", async () => {
+    const { SshTunnel } = await import("../ssh-tunnel");
+    const SshTunnelMock = SshTunnel as unknown as ReturnType<typeof vi.fn>;
+    SshTunnelMock.mockImplementation(function () {
+      const { EventEmitter } = require("node:events");
+      const tunnel = new EventEmitter();
+      tunnel.connect = vi.fn().mockResolvedValue(undefined);
+      tunnel.disconnect = vi.fn();
+      tunnel.markConnected = vi.fn();
+      tunnel.isConnected = vi.fn().mockReturnValue(true);
+      tunnel.getState = vi.fn().mockReturnValue("connected");
+      return tunnel;
+    });
+
+    const csInfo = {
+      id: 1, name: "test-cs", displayName: "test-cs",
+      repository: "user/repo", state: "Available",
+      machine: "4-core", lastUsedAt: "2026-04-20T00:00:00Z",
+    };
+    vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
+
+    const manager = new CodespaceManager(23337, () => "tok");
+    const phases: (string | undefined)[] = [];
+    manager.on("connectionChanged", (c) => {
+      phases.push(c.progress?.phase ?? `[final:${c.connectionState}]`);
+    });
+
+    await manager.connect(csInfo, "claude-opus");
+
+    // Expect at minimum: allocating-port → opening-tunnel → writing-config
+    // → verifying-config → starting-health-check → final connected (no progress).
+    expect(phases).toContain("allocating-port");
+    expect(phases).toContain("opening-tunnel");
+    expect(phases).toContain("writing-config");
+    expect(phases).toContain("verifying-config");
+    expect(phases).toContain("starting-health-check");
+    expect(phases[phases.length - 1]).toBe("[final:connected]");
+
+    // Order check: opening-tunnel must come before writing-config; writing
+    // before verifying.
+    const tunnelIdx = phases.indexOf("opening-tunnel");
+    const writeIdx = phases.indexOf("writing-config");
+    const verifyIdx = phases.indexOf("verifying-config");
+    expect(tunnelIdx).toBeLessThan(writeIdx);
+    expect(writeIdx).toBeLessThan(verifyIdx);
+  });
+
+  it("emits writing-config attempt counter when first attempt does not verify", async () => {
+    const { SshTunnel } = await import("../ssh-tunnel");
+    const SshTunnelMock = SshTunnel as unknown as ReturnType<typeof vi.fn>;
+    SshTunnelMock.mockImplementation(function () {
+      const { EventEmitter } = require("node:events");
+      const tunnel = new EventEmitter();
+      tunnel.connect = vi.fn().mockResolvedValue(undefined);
+      tunnel.disconnect = vi.fn();
+      tunnel.markConnected = vi.fn();
+      tunnel.isConnected = vi.fn().mockReturnValue(true);
+      tunnel.getState = vi.fn().mockReturnValue("connected");
+      return tunnel;
+    });
+
+    const csInfo = {
+      id: 1, name: "test-cs", displayName: "test-cs",
+      repository: "user/repo", state: "Available",
+      machine: "4-core", lastUsedAt: "2026-04-20T00:00:00Z",
+    };
+    vi.mocked(executeRemoteCommand)
+      .mockResolvedValueOnce("")     // attempt 1: write
+      .mockResolvedValueOnce("")     // attempt 1: onboarding
+      .mockResolvedValueOnce("0\n")  // attempt 1: verify → not yet
+      .mockResolvedValueOnce("")     // attempt 2: write
+      .mockResolvedValueOnce("")     // attempt 2: onboarding
+      .mockResolvedValueOnce("1\n"); // attempt 2: verify → ok
+
+    const manager = new CodespaceManager(23337, () => "tok");
+    const writeAttempts: number[] = [];
+    manager.on("connectionChanged", (c) => {
+      if (c.progress?.phase === "writing-config" && c.progress.attempt) {
+        writeAttempts.push(c.progress.attempt);
+      }
+    });
+
+    await manager.connect(csInfo, "claude-opus");
+    expect(writeAttempts).toEqual([1, 2]);
+  }, 30_000);
+
+  it("connect() failure sets errorCode=remote-config-failed", async () => {
+    const { SshTunnel } = await import("../ssh-tunnel");
+    const SshTunnelMock = SshTunnel as unknown as ReturnType<typeof vi.fn>;
+    SshTunnelMock.mockImplementation(function () {
+      const { EventEmitter } = require("node:events");
+      const tunnel = new EventEmitter();
+      tunnel.connect = vi.fn().mockResolvedValue(undefined);
+      tunnel.disconnect = vi.fn();
+      tunnel.markConnected = vi.fn();
+      tunnel.isConnected = vi.fn().mockReturnValue(true);
+      tunnel.getState = vi.fn().mockReturnValue("connected");
+      return tunnel;
+    });
+
+    const csInfo = {
+      id: 1, name: "test-cs", displayName: "test-cs",
+      repository: "user/repo", state: "Available",
+      machine: "4-core", lastUsedAt: "2026-04-20T00:00:00Z",
+    };
+    vi.mocked(executeRemoteCommand).mockResolvedValue("0\n");
+
+    const manager = new CodespaceManager(23337, () => "tok");
+    const errors: any[] = [];
+    manager.on("connectionChanged", (c) => {
+      if (c.connectionState === "error") errors.push(c);
+    });
+
+    await expect(manager.connect(csInfo, "claude-opus")).rejects.toThrow();
+    expect(errors[errors.length - 1].errorCode).toBe("remote-config-failed");
+  }, 30_000);
+
+  it("sets errorCode=max-reconnect-reached after MAX attempts", async () => {
+    const { SshTunnel } = await import("../ssh-tunnel");
+    const SshTunnelMock = SshTunnel as unknown as ReturnType<typeof vi.fn>;
+    const tunnelInstances: any[] = [];
+    SshTunnelMock.mockImplementation(function () {
+      const { EventEmitter } = require("node:events");
+      const tunnel = new EventEmitter();
+      tunnel.connect = vi.fn().mockResolvedValue(undefined);
+      tunnel.disconnect = vi.fn();
+      tunnel.markConnected = vi.fn();
+      tunnel.isConnected = vi.fn().mockReturnValue(true);
+      tunnel.getState = vi.fn().mockReturnValue("connected");
+      tunnelInstances.push(tunnel);
+      return tunnel;
+    });
+
+    const csInfo = {
+      id: 1, name: "test-cs", displayName: "test-cs",
+      repository: "user/repo", state: "Available",
+      machine: "4-core", lastUsedAt: "2026-04-20T00:00:00Z",
+    };
+    // Codespace stays Available so handleUnexpectedDisconnect proceeds with reconnect.
+    vi.mocked(listCodespaces).mockResolvedValue([csInfo]);
+    vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
+
+    const manager = new CodespaceManager(23337, () => "tok");
+    await manager.connect(csInfo, "claude-opus");
+
+    // Force the connection's reconnectAttempts to MAX so the next exit
+    // triggers the max-reconnect-reached path immediately, without
+    // burning through the real exponential-backoff timers.
+    const conns = manager.getConnections();
+    expect(conns).toHaveLength(1);
+    // Reach into manager internals to bump the attempt counter.
+    (manager as any).connections.get("test-cs").connection.reconnectAttempts = 5;
+
+    const errors: any[] = [];
+    manager.on("connectionChanged", (c) => {
+      if (c.connectionState === "error") errors.push(c);
+    });
+
+    tunnelInstances[0].emit("unexpectedExit", 255);
+    // Allow the async handleUnexpectedDisconnect to run through state
+    // check + max-attempts branch. No backoff timer is engaged here.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[errors.length - 1].errorCode).toBe("max-reconnect-reached");
   });
 });

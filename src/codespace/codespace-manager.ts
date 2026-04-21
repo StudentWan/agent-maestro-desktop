@@ -8,11 +8,23 @@ import {
   buildUpdateModelScript,
 } from "./remote-config";
 import { MAX_RECONNECT_ATTEMPTS, MAX_PORT_RETRIES, CODESPACE_HEALTH_CHECK_INTERVAL_MS } from "../shared/constants";
-import type { CodespaceInfo, CodespaceConnection, CodespaceConnectionSource } from "./types";
+import type {
+  CodespaceInfo,
+  CodespaceConnection,
+  CodespaceConnectionSource,
+  CodespaceConnectionProgress,
+} from "./types";
+
+const REMOTE_CONFIG_MAX_ATTEMPTS = 4;
 
 interface ConnectionEntry {
   readonly connection: CodespaceConnection;
-  tunnel: SshTunnel;
+  /**
+   * Null while the connection is still being set up (between `connect()`
+   * registering the entry and the SSH tunnel actually coming up). Becomes
+   * non-null once `tunnel.connect()` has resolved.
+   */
+  tunnel: SshTunnel | null;
   healthTimer: ReturnType<typeof setInterval> | null;
 }
 
@@ -56,6 +68,7 @@ export class CodespaceManager extends EventEmitter {
     name: string,
     remotePort: number,
     model: string,
+    onProgress?: (attempt: number, phase: "writing-config" | "verifying-config") => void,
   ): Promise<boolean> {
     const attempts = [0, 2_000, 5_000, 10_000]; // 4 attempts: now, +2s, +5s, +10s
     for (let i = 0; i < attempts.length; i++) {
@@ -63,11 +76,13 @@ export class CodespaceManager extends EventEmitter {
         await new Promise((r) => setTimeout(r, attempts[i]));
       }
       try {
+        onProgress?.(i + 1, "writing-config");
         await this.exec(name, buildWriteConfigScript(remotePort, model));
         await this.exec(name, buildWriteOnboardingScript());
 
         // Verify the marker actually landed. Cheap: cat the file and grep
         // for the AGENT_MAESTRO_MANAGED key.
+        onProgress?.(i + 1, "verifying-config");
         const verify = await this.exec(
           name,
           "cat ~/.claude/settings.json 2>/dev/null | grep -c AGENT_MAESTRO_MANAGED || true",
@@ -112,6 +127,22 @@ export class CodespaceManager extends EventEmitter {
     return entry ? { ...entry.connection } : undefined;
   }
 
+  /**
+   * PIDs of all SSH tunnel child processes currently managed by this
+   * instance. Used by VsCodeCodespaceDetector to exclude our own tunnels
+   * from the process scan — without this, the detector "discovers" our
+   * tunnels and keeps the auto-bridge alive even after the user closes
+   * VS Code.
+   */
+  getOwnPids(): ReadonlySet<number> {
+    const pids = new Set<number>();
+    for (const entry of this.connections.values()) {
+      const pid = entry.tunnel?.getPid();
+      if (pid != null) pids.add(pid);
+    }
+    return pids;
+  }
+
   /** Start a shutdown Codespace, then connect to it. */
   async startAndConnect(
     info: CodespaceInfo,
@@ -130,8 +161,18 @@ export class CodespaceManager extends EventEmitter {
     model: string,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
-    if (this.connections.has(info.name)) {
-      throw new Error(`Already connected to ${info.name}`);
+    const existing = this.connections.get(info.name);
+    if (existing) {
+      // Allow Reconnect after a terminal error: evict the stale entry so
+      // the rest of connect() can run cleanly.
+      if (existing.connection.connectionState === "error") {
+        if (existing.healthTimer) clearInterval(existing.healthTimer);
+        existing.tunnel?.disconnect();
+        this.freePort(existing.connection.remotePort);
+        this.connections.delete(info.name);
+      } else {
+        throw new Error(`Already connected to ${info.name}`);
+      }
     }
 
     const localPort = this.basePort;
@@ -147,15 +188,35 @@ export class CodespaceManager extends EventEmitter {
       lastHealthCheck: null,
       reconnectAttempts: 0,
       source,
+      progress: { phase: "allocating-port" },
     };
 
-    this.emitConnection(connection);
+    // Register the entry IMMEDIATELY so `getConnections()` reflects the
+    // in-flight connection. Without this, a `refresh()` race during the
+    // 0–17s SSH/config phase would return an empty list and the UI would
+    // briefly drop the row (showing the "Connect" button again).
+    this.connections.set(info.name, {
+      connection,
+      tunnel: null,
+      healthTimer: null,
+    });
+    this.publish(connection);
 
     // Port conflict retry loop
     let tunnel: SshTunnel | null = null;
     let portRetries = 0;
 
     while (portRetries < MAX_PORT_RETRIES) {
+      connection = updateConnection(connection, {
+        progress: {
+          phase: "opening-tunnel",
+          attempt: portRetries + 1,
+          maxAttempts: MAX_PORT_RETRIES,
+          detail: `local :${localPort} → remote :${remotePort}`,
+        },
+      });
+      this.publish(connection);
+
       tunnel = new SshTunnel(info.name, remotePort, localPort, this.getToken);
 
       let portConflict = false;
@@ -167,7 +228,13 @@ export class CodespaceManager extends EventEmitter {
         await tunnel.connect();
         if (!portConflict) break;
       } catch {
-        if (!portConflict) throw new Error("SSH tunnel failed to establish");
+        if (!portConflict) {
+          // Drop the placeholder entry before throwing so the UI doesn't
+          // see a phantom in-flight row.
+          this.connections.delete(info.name);
+          this.freePort(remotePort);
+          throw new Error("SSH tunnel failed to establish");
+        }
       }
 
       // Port conflict — try next port
@@ -182,11 +249,19 @@ export class CodespaceManager extends EventEmitter {
       this.freePort(remotePort);
       connection = updateConnection(connection, {
         connectionState: "error",
-        errorMessage: "Failed to find available port",
+        errorCode: "port-exhausted",
+        errorMessage: "Failed to find available port after retries",
+        progress: undefined,
       });
-      this.emitConnection(connection);
+      // Keep the entry so the UI can show the error + Reconnect/Dismiss
+      // buttons. The `error` state is terminal until the user acts.
+      this.publish(connection);
       throw new Error("Failed to find available port after retries");
     }
+
+    // Stash the live tunnel so any access via the map (e.g. disconnect()
+    // racing with the rest of connect()) sees the real handle.
+    this.updateEntry(info.name, { tunnel });
 
     // Configure remote Claude Code.
     //
@@ -203,6 +278,12 @@ export class CodespaceManager extends EventEmitter {
       info.name,
       remotePort,
       model,
+      (attempt, phase) => {
+        connection = updateConnection(connection, {
+          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
+        });
+        this.publish(connection);
+      },
     );
 
     if (!configWritten) {
@@ -213,9 +294,12 @@ export class CodespaceManager extends EventEmitter {
       this.freePort(remotePort);
       connection = updateConnection(connection, {
         connectionState: "error",
+        errorCode: "remote-config-failed",
         errorMessage: "Failed to configure Claude Code in codespace (SSH not ready or python3 missing)",
+        progress: undefined,
       });
-      this.emitConnection(connection);
+      this.updateEntry(info.name, { tunnel: null });
+      this.publish(connection);
       throw new Error("Remote config write failed");
     }
 
@@ -225,6 +309,11 @@ export class CodespaceManager extends EventEmitter {
     });
 
     // Start health check (app-level: curl /health through tunnel)
+    connection = updateConnection(connection, {
+      progress: { phase: "starting-health-check" },
+    });
+    this.publish(connection);
+
     const healthTimer = setInterval(() => {
       this.healthCheck(info.name);
     }, CODESPACE_HEALTH_CHECK_INTERVAL_MS);
@@ -232,10 +321,11 @@ export class CodespaceManager extends EventEmitter {
     connection = updateConnection(connection, {
       connectionState: "connected",
       connectedAt: Date.now(),
+      progress: undefined,
     });
 
-    this.connections.set(info.name, { connection, tunnel, healthTimer });
-    this.emitConnection(connection);
+    this.updateEntry(info.name, { tunnel, healthTimer });
+    this.publish(connection);
 
     return { ...connection };
   }
@@ -244,9 +334,12 @@ export class CodespaceManager extends EventEmitter {
     const entry = this.connections.get(name);
     if (!entry) return;
 
-    let connection = updateConnection(entry.connection, { connectionState: "disconnecting" });
+    let connection = updateConnection(entry.connection, {
+      connectionState: "disconnecting",
+      progress: { phase: "checking-state" },
+    });
     this.connections.set(name, { ...entry, connection });
-    this.emitConnection(connection);
+    this.publish(connection);
 
     // Stop health check
     if (entry.healthTimer) clearInterval(entry.healthTimer);
@@ -265,6 +358,11 @@ export class CodespaceManager extends EventEmitter {
     }
 
     if (stillAvailable) {
+      connection = updateConnection(connection, {
+        progress: { phase: "cleaning-remote" },
+      });
+      this.connections.set(name, { ...entry, connection });
+      this.publish(connection);
       try {
         await this.exec(name, buildRemoveConfigScript());
       } catch {
@@ -274,13 +372,17 @@ export class CodespaceManager extends EventEmitter {
       console.log(`[CodespaceManager] Skipping remote cleanup for ${name} — not Available`);
     }
 
-    // Kill tunnel
-    entry.tunnel.disconnect();
+    // Kill tunnel (may be null if disconnect races with a still-setting-up
+    // connection — that's fine, the placeholder entry is dropped below).
+    entry.tunnel?.disconnect();
     this.freePort(connection.remotePort);
 
-    connection = updateConnection(connection, { connectionState: "available" });
+    connection = updateConnection(connection, {
+      connectionState: "available",
+      progress: undefined,
+    });
     this.connections.delete(name);
-    this.emitConnection(connection);
+    this.publish(connection);
   }
 
   async disconnectAll(): Promise<void> {
@@ -288,11 +390,34 @@ export class CodespaceManager extends EventEmitter {
     await Promise.allSettled(names.map((name) => this.disconnect(name)));
   }
 
+  /**
+   * Evict a terminal-error entry without going through disconnect()'s
+   * remote-cleanup dance. Used by the UI's "Dismiss" action — without this,
+   * the error entry stays in the map and the next refresh() re-adds it.
+   * No-op for non-error entries (use disconnect() instead).
+   */
+  dismiss(name: string): void {
+    const entry = this.connections.get(name);
+    if (!entry) return;
+    if (entry.connection.connectionState !== "error") return;
+    if (entry.healthTimer) clearInterval(entry.healthTimer);
+    entry.tunnel?.disconnect();
+    this.freePort(entry.connection.remotePort);
+    this.connections.delete(name);
+    const finalConn = updateConnection(entry.connection, {
+      connectionState: "available",
+      progress: undefined,
+      errorCode: undefined,
+      errorMessage: undefined,
+    });
+    this.publish(finalConn);
+  }
+
   /** Synchronous kill of all SSH processes. Used during app quit. */
   killAllTunnels(): void {
     for (const [, entry] of this.connections) {
       if (entry.healthTimer) clearInterval(entry.healthTimer);
-      entry.tunnel.disconnect();
+      entry.tunnel?.disconnect();
     }
     this.connections.clear();
     this.allocatedPorts.clear();
@@ -340,13 +465,13 @@ export class CodespaceManager extends EventEmitter {
       // cleanup (the codespace is gone — exec would either fail or, worse,
       // wake it back up).
       if (entry.healthTimer) clearInterval(entry.healthTimer);
-      entry.tunnel.disconnect();
+      entry.tunnel?.disconnect();
       this.freePort(entry.connection.remotePort);
       const finalConn = updateConnection(entry.connection, {
         connectionState: "available",
       });
       this.connections.delete(name);
-      this.emitConnection(finalConn);
+      this.publish(finalConn);
       return;
     }
 
@@ -357,6 +482,16 @@ export class CodespaceManager extends EventEmitter {
   private async handleUnexpectedDisconnect(name: string, model: string): Promise<void> {
     const entry = this.connections.get(name);
     if (!entry) return;
+
+    // Mark as reconnecting + checking-state up front so the UI shows
+    // something more specific than a stale "connected" while we query
+    // GitHub for authoritative state.
+    let updated = updateConnection(entry.connection, {
+      connectionState: "reconnecting",
+      progress: { phase: "checking-state" },
+    });
+    this.connections.set(name, { ...entry, connection: updated });
+    this.publish(updated);
 
     // CRITICAL: before any reconnect attempt, verify the codespace is still
     // in `Available` state on GitHub. `gh codespace ssh` will silently
@@ -383,50 +518,78 @@ export class CodespaceManager extends EventEmitter {
       // exec (the remote side is gone) and skip the disconnecting/available
       // emit dance so the UI sees a clean removal.
       if (entry.healthTimer) clearInterval(entry.healthTimer);
-      entry.tunnel.disconnect();
+      entry.tunnel?.disconnect();
       this.freePort(entry.connection.remotePort);
       const finalConn = updateConnection(entry.connection, {
         connectionState: "available",
+        progress: undefined,
       });
       this.connections.delete(name);
-      this.emitConnection(finalConn);
+      this.publish(finalConn);
       return;
     }
 
     if (entry.connection.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      const updated = updateConnection(entry.connection, {
+      updated = updateConnection(entry.connection, {
         connectionState: "error",
-        errorMessage: "Max reconnect attempts reached",
+        errorCode: "max-reconnect-reached",
+        errorMessage: `Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached`,
+        progress: undefined,
       });
       this.connections.set(name, { ...entry, connection: updated });
-      this.emitConnection(updated);
+      this.publish(updated);
       this.emit("connectionError", { name, message: updated.errorMessage });
       return;
     }
 
-    let updated = updateConnection(entry.connection, {
+    const nextAttempt = entry.connection.reconnectAttempts + 1;
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+    const delaySec = Math.pow(2, nextAttempt - 1);
+
+    updated = updateConnection(entry.connection, {
       connectionState: "reconnecting",
-      reconnectAttempts: entry.connection.reconnectAttempts + 1,
+      reconnectAttempts: nextAttempt,
+      progress: {
+        phase: "waiting-backoff",
+        attempt: nextAttempt,
+        maxAttempts: MAX_RECONNECT_ATTEMPTS,
+        detail: `${delaySec}s`,
+      },
     });
     this.connections.set(name, { ...entry, connection: updated });
-    this.emitConnection(updated);
+    this.publish(updated);
 
-    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
-    const delay = Math.pow(2, updated.reconnectAttempts - 1) * 1000;
-    await new Promise((r) => setTimeout(r, delay));
+    await new Promise((r) => setTimeout(r, delaySec * 1000));
 
     try {
       this.freePort(updated.remotePort);
       const newPort = this.allocatePort();
-      updated = updateConnection(updated, { remotePort: newPort });
+      updated = updateConnection(updated, {
+        remotePort: newPort,
+        progress: {
+          phase: "opening-tunnel",
+          attempt: nextAttempt,
+          maxAttempts: MAX_RECONNECT_ATTEMPTS,
+          detail: `local :${updated.localPort} → remote :${newPort}`,
+        },
+      });
+      this.connections.set(name, { ...entry, connection: updated });
+      this.publish(updated);
 
       const tunnel = new SshTunnel(name, newPort, updated.localPort, this.getToken);
       await tunnel.connect();
+      this.updateEntry(name, { tunnel });
 
       // Use the same retry-and-verify path as the initial connect — a
       // reconnect after the codespace was briefly unreachable is exactly
       // when SSH is least cooperative.
-      await this.writeRemoteConfigWithRetry(name, newPort, model);
+      await this.writeRemoteConfigWithRetry(name, newPort, model, (attempt, phase) => {
+        updated = updateConnection(updated, {
+          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
+        });
+        this.connections.set(name, { ...entry, connection: updated, tunnel });
+        this.publish(updated);
+      });
 
       tunnel.on("unexpectedExit", () => {
         this.handleUnexpectedDisconnect(name, model);
@@ -435,21 +598,41 @@ export class CodespaceManager extends EventEmitter {
       updated = updateConnection(updated, {
         connectionState: "connected",
         reconnectAttempts: 0,
+        progress: undefined,
       });
       this.connections.set(name, { connection: updated, tunnel, healthTimer: entry.healthTimer });
-      this.emitConnection(updated);
+      this.publish(updated);
     } catch {
       updated = updateConnection(updated, {
         connectionState: "error",
+        errorCode: "reconnect-failed",
         errorMessage: "Reconnection failed",
+        progress: undefined,
       });
       this.connections.set(name, { ...entry, connection: updated });
-      this.emitConnection(updated);
+      this.publish(updated);
       this.emit("connectionError", { name, message: "Reconnection failed" });
     }
   }
 
-  private emitConnection(connection: CodespaceConnection): void {
+  /** Patch the live entry without touching the published connection. */
+  private updateEntry(name: string, patch: Partial<ConnectionEntry>): void {
+    const entry = this.connections.get(name);
+    if (!entry) return;
+    this.connections.set(name, { ...entry, ...patch });
+  }
+
+  /**
+   * Single source of truth for "the connection state changed":
+   * 1) update the connection inside the live entry (so getConnections()
+   *    returns the latest snapshot and refresh() races don't drop the row)
+   * 2) emit so the UI gets the patch immediately.
+   */
+  private publish(connection: CodespaceConnection): void {
+    const entry = this.connections.get(connection.id);
+    if (entry) {
+      this.connections.set(connection.id, { ...entry, connection });
+    }
     this.emit("connectionChanged", { ...connection });
   }
 }

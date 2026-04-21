@@ -58,6 +58,7 @@ const api = {
     connect: (name: string) => ipcRenderer.invoke("codespace:connect" satisfies IpcChannels, name),
     disconnect: (name: string) => ipcRenderer.invoke("codespace:disconnect" satisfies IpcChannels, name),
     disconnectAll: () => ipcRenderer.invoke("codespace:disconnect-all" satisfies IpcChannels),
+    dismiss: (name: string) => ipcRenderer.invoke("codespace:dismiss" satisfies IpcChannels, name),
     getConnections: () => ipcRenderer.invoke("codespace:get-connections" satisfies IpcChannels),
     onStatusChanged: (callback: (connection: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, connection: unknown) => callback(connection);

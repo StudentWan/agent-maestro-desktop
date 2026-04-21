@@ -26,6 +26,12 @@ export interface VsCodeCodespaceDetectorOptions {
    * without being re-instantiated.
    */
   getToken?: () => string | undefined;
+  /**
+   * PIDs to exclude from the process scan. Prevents the detector from
+   * "discovering" our own SSH tunnel processes and keeping the auto-bridge
+   * alive after the user has closed VS Code.
+   */
+  getExcludePids?: () => ReadonlySet<number>;
   codespaceListCacheMs?: number;
   now?: () => number;
 }
@@ -96,6 +102,7 @@ export class VsCodeCodespaceDetector extends EventEmitter {
   private readonly listProcessesFn: () => Promise<ProcessInfo[]>;
   private readonly listWindowTitlesFn: () => Promise<string[]>;
   private readonly listCodespacesFn: () => Promise<CodespaceInfo[]>;
+  private readonly getExcludePidsFn: () => ReadonlySet<number>;
   private readonly nowFn: () => number;
 
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -113,6 +120,7 @@ export class VsCodeCodespaceDetector extends EventEmitter {
     this.listCodespacesFn =
       options.listCodespaces ??
       (() => defaultListCodespaces(options.getToken?.()));
+    this.getExcludePidsFn = options.getExcludePids ?? (() => new Set());
     this.nowFn = options.now ?? Date.now;
   }
 
@@ -160,9 +168,14 @@ export class VsCodeCodespaceDetector extends EventEmitter {
       }
 
       // Fallback: process command lines (works for `gh cs ssh` and older flows).
+      // Exclude our own SSH tunnel PIDs — otherwise we'd "discover" our own
+      // tunnels and keep the auto-bridge alive even after the user closes
+      // VS Code.
+      const excludePids = this.getExcludePidsFn();
       const processes = await this.safeListProcesses();
       const cmdCandidates = new Set<string>();
       for (const p of processes) {
+        if (excludePids.has(p.pid)) continue;
         for (const name of extractCandidateNames(p.command)) {
           cmdCandidates.add(name);
         }
