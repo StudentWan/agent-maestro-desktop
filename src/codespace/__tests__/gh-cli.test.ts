@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { checkGhCli, parseGhVersion, compareVersions } from "../gh-cli";
+import { checkGhCli, parseGhVersion, compareVersions, listCodespaces, spawnSshTunnel, executeRemoteCommand, startCodespace } from "../gh-cli";
 
 // Mock child_process
 vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 const mockExecFile = vi.mocked(execFile);
+const mockSpawn = vi.mocked(spawn);
 
 describe("parseGhVersion", () => {
   it("parses standard version string", () => {
@@ -77,5 +79,87 @@ describe("checkGhCli", () => {
     expect(status.version).toBe("2.45.0");
     expect(status.meetsMinVersion).toBe(true);
     expect(status.authenticated).toBe(true);
+  });
+});
+
+describe("GH_TOKEN injection", () => {
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockSpawn.mockReset();
+  });
+
+  it("listCodespaces injects GH_TOKEN when token provided", async () => {
+    let capturedOpts: any;
+    mockExecFile.mockImplementation((_cmd: any, _args: any, opts: any, callback: any) => {
+      capturedOpts = opts;
+      if (typeof opts === "function") callback = opts;
+      callback(null, "[]", "");
+      return {} as any;
+    });
+
+    await listCodespaces("ghp_test_token_123");
+    expect(capturedOpts.env).toBeDefined();
+    expect(capturedOpts.env.GH_TOKEN).toBe("ghp_test_token_123");
+  });
+
+  it("listCodespaces does not inject GH_TOKEN when token omitted", async () => {
+    let capturedOpts: any;
+    mockExecFile.mockImplementation((_cmd: any, _args: any, opts: any, callback: any) => {
+      capturedOpts = opts;
+      callback(null, "[]", "");
+      return {} as any;
+    });
+
+    await listCodespaces();
+    // env should equal process.env reference (not extended with GH_TOKEN unless already set)
+    expect(capturedOpts.env).toBe(process.env);
+  });
+
+  it("startCodespace injects GH_TOKEN when token provided", async () => {
+    let capturedOpts: any;
+    mockExecFile.mockImplementation((_cmd: any, _args: any, opts: any, callback: any) => {
+      capturedOpts = opts;
+      callback(null, "", "");
+      return {} as any;
+    });
+
+    await startCodespace("my-codespace", "ghp_xyz");
+    expect(capturedOpts.env.GH_TOKEN).toBe("ghp_xyz");
+  });
+
+  it("executeRemoteCommand injects GH_TOKEN when token provided", async () => {
+    let capturedOpts: any;
+    mockExecFile.mockImplementation((_cmd: any, _args: any, opts: any, callback: any) => {
+      capturedOpts = opts;
+      callback(null, "ok\n", "");
+      return {} as any;
+    });
+
+    await executeRemoteCommand("my-cs", "echo hi", 5000, "ghp_remote");
+    expect(capturedOpts.env.GH_TOKEN).toBe("ghp_remote");
+    expect(capturedOpts.timeout).toBe(5000);
+  });
+
+  it("spawnSshTunnel injects GH_TOKEN into spawn env", () => {
+    mockSpawn.mockReturnValue({} as any);
+
+    spawnSshTunnel("my-cs", 23337, 23337, "ghp_ssh_token");
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      "gh",
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ GH_TOKEN: "ghp_ssh_token" }),
+      }),
+    );
+  });
+
+  it("spawnSshTunnel falls back to process.env when no token", () => {
+    mockSpawn.mockReturnValue({} as any);
+
+    spawnSshTunnel("my-cs", 23337, 23337);
+
+    const callArgs = mockSpawn.mock.calls[0];
+    expect(callArgs[2]?.env).toBe(process.env);
   });
 });

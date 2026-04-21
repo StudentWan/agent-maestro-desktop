@@ -1,5 +1,6 @@
 export type IpcChannels =
   | "auth:start-login"
+  | "auth:reauthorize"
   | "auth:logout"
   | "auth:get-status"
   | "proxy:start"
@@ -14,6 +15,7 @@ export type IpcChannels =
   | "settings:set-auto-start"
   | "codespace:check-gh-cli"
   | "codespace:list"
+  | "codespace:list-active-vscode"
   | "codespace:connect"
   | "codespace:disconnect"
   | "codespace:disconnect-all"

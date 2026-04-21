@@ -39,6 +39,8 @@ export default function CodespacePanel({ authenticated }: Props) {
   const [ghStatus, setGhStatus] = useState<GhCliStatus | null>(null);
   const [codespaces, setCodespaces] = useState<CodespaceInfo[]>([]);
   const [connections, setConnections] = useState<CodespaceConnection[]>([]);
+  const [activeVscode, setActiveVscode] = useState<string[]>([]);
+  const [showAll, setShowAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -48,14 +50,16 @@ export default function CodespacePanel({ authenticated }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const [status, list, conns] = await Promise.all([
+      const [status, list, conns, active] = await Promise.all([
         api.codespace.checkGhCli(),
         api.codespace.list().catch(() => [] as CodespaceInfo[]),
         api.codespace.getConnections(),
+        api.codespace.listActiveVscode().catch(() => [] as string[]),
       ]);
       setGhStatus(status as GhCliStatus);
       setCodespaces(list as CodespaceInfo[]);
       setConnections(conns as CodespaceConnection[]);
+      setActiveVscode(active as string[]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -146,25 +150,56 @@ export default function CodespacePanel({ authenticated }: Props) {
 
   if (!authenticated) return null;
 
-  // Merge codespaces with connections
-  const items: DisplayItem[] = codespaces
+  // Merge codespaces with connections.
+  //
+  // Default view: only show codespaces that are either currently open in the
+  // local VS Code OR have an active proxy connection. This keeps the panel
+  // focused on "what's running right now" instead of dumping the user's
+  // entire account inventory. The "Show all" toggle restores the old
+  // behavior for cases where the user wants to manually start a stopped
+  // codespace.
+  const activeNameSet = new Set(activeVscode);
+  const connectedNameSet = new Set(connections.map((c) => c.id));
+  const filtered = showAll
+    ? codespaces
+    : codespaces.filter(
+        (info) => activeNameSet.has(info.name) || connectedNameSet.has(info.name),
+      );
+
+  const items: DisplayItem[] = filtered
     .sort((a, b) => new Date(b.lastUsedAt).getTime() - new Date(a.lastUsedAt).getTime())
     .map((info) => ({
       info,
       connection: connections.find((c) => c.id === info.name),
     }));
 
+  const hiddenCount = codespaces.length - filtered.length;
+
   return (
     <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 col-span-full">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">Codespaces</h2>
-        <button
-          onClick={refresh}
-          disabled={loading}
-          className="text-sm px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
-        >
-          {loading ? "Refreshing..." : "Refresh"}
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="text-xs text-gray-400 flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showAll}
+              onChange={(e) => setShowAll(e.target.checked)}
+              className="accent-blue-500"
+            />
+            Show all
+            {!showAll && hiddenCount > 0 && (
+              <span className="text-gray-500">({hiddenCount} hidden)</span>
+            )}
+          </label>
+          <button
+            onClick={refresh}
+            disabled={loading}
+            className="text-sm px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+          >
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
       </div>
 
       {/* gh CLI status */}
@@ -197,7 +232,11 @@ export default function CodespacePanel({ authenticated }: Props) {
 
       {/* Codespace list */}
       {items.length === 0 && !loading && (
-        <p className="text-sm text-gray-500">No Codespaces found</p>
+        <p className="text-sm text-gray-500">
+          {codespaces.length === 0
+            ? "No Codespaces found"
+            : "No Codespaces are currently open in VS Code. Toggle 'Show all' to see your full inventory."}
+        </p>
       )}
 
       <div className="space-y-2">
@@ -217,6 +256,14 @@ export default function CodespacePanel({ authenticated }: Props) {
                   <div className="flex items-center gap-2">
                     <span>{stateIcon(connState)}</span>
                     <span className="font-mono text-sm truncate">{item.info.displayName}</span>
+                    {item.connection?.source === "vscode-auto" && (
+                      <span
+                        title="Auto-bridged from VS Code"
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300 border border-blue-700/50"
+                      >
+                        VS Code auto
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-gray-400 mt-1 ml-6">
                     {item.info.repository}

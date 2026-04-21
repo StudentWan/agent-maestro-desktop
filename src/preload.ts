@@ -4,6 +4,7 @@ import type { IpcChannels } from "./shared/ipc-channels";
 const api = {
   // Auth
   startLogin: () => ipcRenderer.invoke("auth:start-login" satisfies IpcChannels),
+  reauthorize: () => ipcRenderer.invoke("auth:reauthorize" satisfies IpcChannels),
   logout: () => ipcRenderer.invoke("auth:logout" satisfies IpcChannels),
   getAuthStatus: () => ipcRenderer.invoke("auth:get-status" satisfies IpcChannels),
 
@@ -53,6 +54,7 @@ const api = {
   codespace: {
     checkGhCli: () => ipcRenderer.invoke("codespace:check-gh-cli" satisfies IpcChannels),
     list: () => ipcRenderer.invoke("codespace:list" satisfies IpcChannels),
+    listActiveVscode: () => ipcRenderer.invoke("codespace:list-active-vscode" satisfies IpcChannels),
     connect: (name: string) => ipcRenderer.invoke("codespace:connect" satisfies IpcChannels, name),
     disconnect: (name: string) => ipcRenderer.invoke("codespace:disconnect" satisfies IpcChannels, name),
     disconnectAll: () => ipcRenderer.invoke("codespace:disconnect-all" satisfies IpcChannels),

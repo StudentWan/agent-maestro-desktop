@@ -43,6 +43,10 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
     const originalModel = requestBody.model;
     const isStream = requestBody.stream === true;
 
+    // Surface metadata to the request-logger middleware (which runs after us).
+    c.set("loggedModel", originalModel);
+    c.set("loggedStream", isStream);
+
     try {
       // Convert Anthropic request → OpenAI/Copilot request
       const headers: Record<string, string | undefined> = {
@@ -96,6 +100,7 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("[Messages Route] Error:", message);
+      c.set("loggedError", message);
 
       // Detect context window / context length exceeded errors from Copilot
       const isContextExceeded =

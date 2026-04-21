@@ -65,6 +65,10 @@ export default function App() {
     await api.logout();
   }, []);
 
+  const handleReauthorize = useCallback(async () => {
+    await api.reauthorize();
+  }, []);
+
   const handleStartProxy = useCallback(async () => {
     await api.startProxy();
   }, []);
@@ -90,6 +94,7 @@ export default function App() {
             status={authStatus}
             onLogin={handleLogin}
             onLogout={handleLogout}
+            onReauthorize={handleReauthorize}
           />
           <ProxyPanel
             status={proxyStatus}

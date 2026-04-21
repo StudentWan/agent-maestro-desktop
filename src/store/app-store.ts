@@ -5,6 +5,7 @@ import { DEFAULT_PROXY_PORT } from "../shared/constants";
 const store = new Store<StoreSchema>({
   defaults: {
     githubToken: null,
+    codespaceToken: null,
     proxyPort: DEFAULT_PROXY_PORT,
     autoStart: true,
     minimizeToTray: true,
@@ -18,6 +19,14 @@ export function getGithubToken(): string | null {
 
 export function setGithubToken(token: string | null): void {
   store.set("githubToken", token);
+}
+
+export function getCodespaceToken(): string | null {
+  return store.get("codespaceToken");
+}
+
+export function setCodespaceToken(token: string | null): void {
+  store.set("codespaceToken", token);
 }
 
 export function getProxyPort(): number {

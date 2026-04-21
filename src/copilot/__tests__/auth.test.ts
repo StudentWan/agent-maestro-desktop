@@ -1,16 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { requestDeviceCode, pollForAccessToken, getGitHubUsername } from '../auth'
+import { requestDeviceCode, pollForAccessToken, getGitHubUsername, parseScopesHeader, computeMissingScopes, checkTokenScopes } from '../auth'
 
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
-function createFetchResponse(data: unknown, ok = true, status = 200) {
+function createFetchResponse(data: unknown, ok = true, status = 200, headers?: Record<string, string>) {
+  const headerMap = new Map<string, string>()
+  if (headers) {
+    for (const [k, v] of Object.entries(headers)) headerMap.set(k.toLowerCase(), v)
+  }
   return {
     ok,
     status,
     statusText: ok ? 'OK' : 'Error',
     json: () => Promise.resolve(data),
     text: () => Promise.resolve(JSON.stringify(data)),
+    headers: { get: (name: string) => headerMap.get(name.toLowerCase()) ?? null },
   }
 }
 
@@ -57,6 +62,19 @@ describe('requestDeviceCode', () => {
         }),
       }),
     )
+  })
+
+  it('requests both read:user and codespace scopes', async () => {
+    mockFetch.mockResolvedValueOnce(createFetchResponse({
+      device_code: 'x', user_code: 'Y', verification_uri: 'z', expires_in: 1, interval: 1,
+    }))
+
+    await requestDeviceCode()
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string)
+    // Primary device flow only asks for read:user; codespace is granted via
+    // a separate flow because the Copilot OAuth App can't issue it.
+    expect(body.scope).toBe('read:user')
   })
 })
 
@@ -187,5 +205,84 @@ describe('getGitHubUsername', () => {
   it('throws on HTTP error', async () => {
     mockFetch.mockResolvedValueOnce(createFetchResponse({}, false, 401))
     await expect(getGitHubUsername('bad-token')).rejects.toThrow('Failed to fetch GitHub user')
+  })
+})
+
+describe('parseScopesHeader', () => {
+  it('returns [] for null/undefined/empty', () => {
+    expect(parseScopesHeader(null)).toEqual([])
+    expect(parseScopesHeader(undefined)).toEqual([])
+    expect(parseScopesHeader('')).toEqual([])
+  })
+
+  it('splits comma-separated scopes', () => {
+    expect(parseScopesHeader('read:user, codespace')).toEqual(['read:user', 'codespace'])
+  })
+
+  it('trims whitespace and filters empty', () => {
+    expect(parseScopesHeader('  read:user , , codespace  ')).toEqual(['read:user', 'codespace'])
+  })
+})
+
+describe('computeMissingScopes', () => {
+  it('returns [] when all required scopes present', () => {
+    expect(computeMissingScopes(['read:user', 'codespace'])).toEqual([])
+  })
+
+  it('returns missing scopes in required order', () => {
+    expect(computeMissingScopes(['read:user'])).toEqual(['codespace'])
+    expect(computeMissingScopes([])).toEqual(['codespace'])
+  })
+
+  it('ignores extra scopes', () => {
+    expect(computeMissingScopes(['read:user', 'codespace', 'repo', 'gist'])).toEqual([])
+  })
+
+  it('does not infer scope hierarchy (literal match only)', () => {
+    // `repo` does NOT imply `codespace` even though gh's auth flow ties them
+    expect(computeMissingScopes(['read:user', 'repo'])).toEqual(['codespace'])
+  })
+
+  it('accepts custom required list', () => {
+    expect(computeMissingScopes(['gist'], ['gist', 'repo'])).toEqual(['repo'])
+  })
+})
+
+describe('checkTokenScopes', () => {
+  beforeEach(() => {
+    mockFetch.mockReset()
+  })
+
+  it('returns hasAllRequiredScopes=true when token has both scopes', async () => {
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({ login: 'user' }, true, 200, { 'X-OAuth-Scopes': 'read:user, codespace' }),
+    )
+    const status = await checkTokenScopes('tok')
+    expect(status.hasAllRequiredScopes).toBe(true)
+    expect(status.missingScopes).toEqual([])
+    expect(status.scopes).toContain('codespace')
+  })
+
+  it('reports missing codespace scope', async () => {
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({ login: 'user' }, true, 200, { 'X-OAuth-Scopes': 'read:user' }),
+    )
+    const status = await checkTokenScopes('tok')
+    expect(status.hasAllRequiredScopes).toBe(false)
+    expect(status.missingScopes).toEqual(['codespace'])
+  })
+
+  it('treats missing X-OAuth-Scopes header as no scopes', async () => {
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({ login: 'user' }, true, 200, {}),
+    )
+    const status = await checkTokenScopes('tok')
+    expect(status.scopes).toEqual([])
+    expect(status.missingScopes).toEqual(['codespace'])
+  })
+
+  it('throws on 401', async () => {
+    mockFetch.mockResolvedValueOnce(createFetchResponse({}, false, 401))
+    await expect(checkTokenScopes('bad')).rejects.toThrow('Failed to check token scopes')
   })
 })

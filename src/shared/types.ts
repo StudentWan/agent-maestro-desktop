@@ -4,6 +4,15 @@ export interface AuthStatus {
   username?: string;
   loginUrl?: string;
   userCode?: string;
+  /**
+   * Scopes from REQUIRED_OAUTH_SCOPES that the current token is missing.
+   * Empty array (or undefined when not authenticated) means the token has
+   * everything it needs. Surfaced in the UI as a "Re-authorize" prompt
+   * when non-empty.
+   */
+  missingScopes?: string[];
+  /** Optional error message from the last auth operation. */
+  error?: string;
 }
 
 export interface DeviceCodeResponse {
@@ -71,6 +80,12 @@ export interface AppConfig {
 // Store
 export interface StoreSchema {
   githubToken: string | null;
+  /**
+   * Token from the secondary device flow (gh CLI client_id) carrying the
+   * `codespace` scope. Stored separately from githubToken because the
+   * Copilot OAuth App can't grant `codespace` itself.
+   */
+  codespaceToken: string | null;
   proxyPort: number;
   autoStart: boolean;
   minimizeToTray: boolean;

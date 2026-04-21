@@ -78,4 +78,56 @@ describe('request-logger middleware', () => {
     const id2 = logCallback.mock.calls[1][0].id
     expect(id1).not.toBe(id2)
   })
+
+  it('reports model from c.set("loggedModel") instead of "unknown"', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.post('/v1/messages', (c) => {
+      c.set('loggedModel', 'claude-sonnet-4-5')
+      c.set('loggedStream', true)
+      return c.json({ ok: true })
+    })
+
+    await app.request('/v1/messages', { method: 'POST' })
+
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.model).toBe('claude-sonnet-4-5')
+    expect(entry.stream).toBe(true)
+  })
+
+  it('reports input/output tokens and error message when set on context', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.post('/v1/messages', (c) => {
+      c.set('loggedModel', 'claude-haiku-4')
+      c.set('loggedInputTokens', 1234)
+      c.set('loggedOutputTokens', 56)
+      c.set('loggedError', 'context_length_exceeded')
+      return c.json({ ok: true })
+    })
+
+    await app.request('/v1/messages', { method: 'POST' })
+
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.inputTokens).toBe(1234)
+    expect(entry.outputTokens).toBe(56)
+    expect(entry.error).toBe('context_length_exceeded')
+  })
+
+  it('falls back to "unknown" when route does not set loggedModel', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.get('/health', (c) => c.json({ ok: true }))
+
+    await app.request('/health')
+
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.model).toBe('unknown')
+  })
 })

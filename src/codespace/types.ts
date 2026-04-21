@@ -34,6 +34,8 @@ export interface CodespaceInfo {
   lastUsedAt: string;
 }
 
+export type CodespaceConnectionSource = "manual" | "vscode-auto";
+
 export interface CodespaceConnection {
   id: string;
   info: CodespaceInfo;
@@ -43,6 +45,7 @@ export interface CodespaceConnection {
   connectedAt: number | null;
   lastHealthCheck: number | null;
   reconnectAttempts: number;
+  source: CodespaceConnectionSource;
   errorMessage?: string;
 }
 

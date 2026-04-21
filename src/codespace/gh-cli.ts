@@ -3,19 +3,39 @@ import { REMOTE_COMMAND_TIMEOUT_MS } from "../shared/constants";
 import type { GhCliStatus, CodespaceInfo } from "./types";
 import { MIN_GH_CLI_VERSION } from "./types";
 
+/**
+ * Build a child-process env that injects our GitHub OAuth token via GH_TOKEN.
+ *
+ * `gh` honors GH_TOKEN over its own auth state, so this lets us authenticate
+ * without depending on the user having run `gh auth login` (or having the
+ * `codespace` scope on their local gh auth).
+ *
+ * When token is undefined, we fall back to the parent env so existing
+ * behavior (using the user's `gh auth`) is preserved.
+ */
+function envWithToken(token?: string): NodeJS.ProcessEnv {
+  if (!token) return process.env;
+  return { ...process.env, GH_TOKEN: token };
+}
+
 function execFilePromise(
   cmd: string,
   args: string[],
-  options?: { timeout?: number },
+  options?: { timeout?: number; env?: NodeJS.ProcessEnv },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFileCb(cmd, args, { timeout: options?.timeout }, (error, stdout, stderr) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve({ stdout: String(stdout), stderr: String(stderr) });
-    });
+    execFileCb(
+      cmd,
+      args,
+      { timeout: options?.timeout, env: options?.env },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
   });
 }
 
@@ -65,11 +85,12 @@ export async function checkGhCli(): Promise<GhCliStatus> {
   return result;
 }
 
-export async function listCodespaces(): Promise<CodespaceInfo[]> {
-  const { stdout } = await execFilePromise("gh", [
-    "api", "/user/codespaces",
-    "--jq", ".codespaces",
-  ], { timeout: REMOTE_COMMAND_TIMEOUT_MS });
+export async function listCodespaces(token?: string): Promise<CodespaceInfo[]> {
+  const { stdout } = await execFilePromise(
+    "gh",
+    ["api", "/user/codespaces", "--jq", ".codespaces"],
+    { timeout: REMOTE_COMMAND_TIMEOUT_MS, env: envWithToken(token) },
+  );
 
   const raw = JSON.parse(stdout) as Array<{
     id: number;
@@ -92,39 +113,48 @@ export async function listCodespaces(): Promise<CodespaceInfo[]> {
   }));
 }
 
-export async function startCodespace(name: string): Promise<void> {
-  await execFilePromise("gh", [
-    "api", "-X", "POST", `/user/codespaces/${name}/start`,
-  ], { timeout: REMOTE_COMMAND_TIMEOUT_MS });
+export async function startCodespace(name: string, token?: string): Promise<void> {
+  await execFilePromise(
+    "gh",
+    ["api", "-X", "POST", `/user/codespaces/${name}/start`],
+    { timeout: REMOTE_COMMAND_TIMEOUT_MS, env: envWithToken(token) },
+  );
 }
 
 export function spawnSshTunnel(
   codespaceName: string,
   remotePort: number,
   localPort: number,
+  token?: string,
 ): ChildProcess {
-  return spawn("gh", [
-    "codespace", "ssh",
-    "--codespace", codespaceName,
-    "--",
-    "-R", `${remotePort}:127.0.0.1:${localPort}`,
-    "-o", "ServerAliveInterval=15",
-    "-o", "ServerAliveCountMax=3",
-    "-N",
-  ], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  return spawn(
+    "gh",
+    [
+      "codespace", "ssh",
+      "--codespace", codespaceName,
+      "--",
+      "-R", `${remotePort}:127.0.0.1:${localPort}`,
+      "-o", "ServerAliveInterval=15",
+      "-o", "ServerAliveCountMax=3",
+      "-N",
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: envWithToken(token),
+    },
+  );
 }
 
 export async function executeRemoteCommand(
   codespaceName: string,
   command: string,
   timeoutMs = REMOTE_COMMAND_TIMEOUT_MS,
+  token?: string,
 ): Promise<string> {
-  const { stdout } = await execFilePromise("gh", [
-    "codespace", "ssh",
-    "--codespace", codespaceName,
-    "--", command,
-  ], { timeout: timeoutMs });
+  const { stdout } = await execFilePromise(
+    "gh",
+    ["codespace", "ssh", "--codespace", codespaceName, "--", command],
+    { timeout: timeoutMs, env: envWithToken(token) },
+  );
   return stdout;
 }

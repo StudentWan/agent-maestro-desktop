@@ -8,13 +8,16 @@ export class SshTunnel extends EventEmitter {
   private process: ChildProcess | null = null;
   private state: CodespaceConnectionState = "available";
   private intentionalDisconnect = false;
+  private readonly getToken: (() => string | undefined) | undefined;
 
   constructor(
     public readonly codespaceName: string,
     public readonly remotePort: number,
     public readonly localPort: number,
+    getToken?: () => string | undefined,
   ) {
     super();
+    this.getToken = getToken;
   }
 
   getState(): CodespaceConnectionState {
@@ -25,7 +28,12 @@ export class SshTunnel extends EventEmitter {
     this.intentionalDisconnect = false;
     this.setState("connecting");
 
-    this.process = spawnSshTunnel(this.codespaceName, this.remotePort, this.localPort);
+    this.process = spawnSshTunnel(
+      this.codespaceName,
+      this.remotePort,
+      this.localPort,
+      this.getToken?.(),
+    );
 
     this.process.stderr?.on("data", (data: Buffer) => {
       const msg = data.toString();
