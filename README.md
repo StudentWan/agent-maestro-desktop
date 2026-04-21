@@ -12,15 +12,17 @@ Key features:
 - Auto-configures proxy settings for Claude Code, VSCode extension, and local CLI
 - Multi-model auto-detection and selection (automatically picks the best model after login)
 - Intuitive UI with request logs, model switching, and settings panel
-- Cross-platform support for Windows/macOS/Linux
+- VS Code Codespace auto-bridge: detects locally-open codespaces and tunnels them through the proxy automatically
+
+> **Platform support:** Windows only. macOS and Linux are not supported at this time.
 
 ## Installation
 
-> Prerequisite: Node.js 18+ and npm
+> **Requirements:** Windows 10+, Node.js 18+, npm
 
 ### Clone the repository
 ```bash
-git clone https://github.com/<your-org>/agent-maestro-desktop.git
+git clone https://github.com/StudentWan/agent-maestro-desktop.git
 cd agent-maestro-desktop
 ```
 
@@ -52,7 +54,7 @@ The installer will be generated in the `out/make` directory.
 
 - **Login failed?** Make sure you have an active Copilot subscription and your token has not expired
 - **Claude Code / VSCode not connecting?** Check your `~/.claude/settings.json` — the proxy port and token must match
-- **Icons not showing?** Clear your Windows icon cache and ensure icon.ico/icon.icns are generated with electron-icon-builder
+- **Icons not showing?** Clear your Windows icon cache and ensure icon.ico is generated with electron-icon-builder
 - **Installer or startup issues?** Try re-running `npm run make` and follow the install wizard
 
 ## Contributing
