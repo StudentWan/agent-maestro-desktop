@@ -4,6 +4,11 @@
  *
  * Python3 is used instead of Node.js because it is universally available
  * in all Codespace images.
+ *
+ * All writes are ATOMIC: we serialize to a sibling tmp file, fsync it, then
+ * os.replace() onto the target. This guarantees a concurrent reader (e.g.
+ * the `claude` CLI starting up at the same instant) will see either the
+ * complete old file or the complete new file — never a half-written one.
  */
 
 /**
@@ -15,6 +20,36 @@ function escapePythonString(value: string): string {
 }
 
 /**
+ * Shared Python helper that performs an atomic JSON dump to `path`. Defined
+ * once and inlined into each script so we don't need to ship a Python module
+ * to the codespace.
+ *
+ * The tmp file lives in the same directory as the target so os.replace() is
+ * a same-filesystem rename (POSIX-atomic). fsync before rename guards against
+ * a power-loss / kill-9 leaving a zero-byte file behind.
+ */
+const ATOMIC_DUMP_HELPER = `
+def _atomic_dump(cfg, path):
+    import json, os, tempfile
+    d = os.path.dirname(path) or '.'
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.maestro-', suffix='.tmp', dir=d)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+`;
+
+/**
  * Generates a Python3 script that writes ~/.claude/settings.json with
  * proxy URL, auth token, model name, and the AGENT_MAESTRO_MANAGED marker.
  */
@@ -22,8 +57,8 @@ export function buildWriteConfigScript(port: number, model: string): string {
   const safeModel = escapePythonString(model);
   return `python3 -c "
 import json, os
+${ATOMIC_DUMP_HELPER}
 p = os.path.expanduser('~/.claude/settings.json')
-os.makedirs(os.path.dirname(p), exist_ok=True)
 try:
     cfg = json.load(open(p))
 except (FileNotFoundError, json.JSONDecodeError):
@@ -33,7 +68,7 @@ cfg['env']['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:${port}'
 cfg['env']['ANTHROPIC_AUTH_TOKEN'] = 'Powered by Agent Maestro Desktop'
 cfg['env']['ANTHROPIC_MODEL'] = '${safeModel}'
 cfg['env']['AGENT_MAESTRO_MANAGED'] = 'true'
-json.dump(cfg, open(p, 'w'), indent=2)
+_atomic_dump(cfg, p)
 "`;
 }
 
@@ -44,13 +79,14 @@ json.dump(cfg, open(p, 'w'), indent=2)
 export function buildWriteOnboardingScript(): string {
   return `python3 -c "
 import json, os
+${ATOMIC_DUMP_HELPER}
 p = os.path.expanduser('~/.claude.json')
 try:
     cfg = json.load(open(p))
 except (FileNotFoundError, json.JSONDecodeError):
     cfg = {}
 cfg['hasCompletedOnboarding'] = True
-json.dump(cfg, open(p, 'w'), indent=2)
+_atomic_dump(cfg, p)
 "`;
 }
 
@@ -62,6 +98,7 @@ json.dump(cfg, open(p, 'w'), indent=2)
 export function buildRemoveConfigScript(): string {
   return `python3 -c "
 import json, os
+${ATOMIC_DUMP_HELPER}
 p = os.path.expanduser('~/.claude/settings.json')
 try:
     cfg = json.load(open(p))
@@ -74,7 +111,7 @@ for key in ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL', 'AG
     env.pop(key, None)
 if not env:
     cfg.pop('env', None)
-json.dump(cfg, open(p, 'w'), indent=2)
+_atomic_dump(cfg, p)
 "`;
 }
 
@@ -87,6 +124,7 @@ export function buildUpdateModelScript(model: string): string {
   const safeModel = escapePythonString(model);
   return `python3 -c "
 import json, os
+${ATOMIC_DUMP_HELPER}
 p = os.path.expanduser('~/.claude/settings.json')
 try:
     cfg = json.load(open(p))
@@ -96,6 +134,6 @@ env = cfg.get('env', {})
 if env.get('AGENT_MAESTRO_MANAGED') != 'true':
     exit(0)
 env['ANTHROPIC_MODEL'] = '${safeModel}'
-json.dump(cfg, open(p, 'w'), indent=2)
+_atomic_dump(cfg, p)
 "`;
 }

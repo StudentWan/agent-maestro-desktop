@@ -103,6 +103,10 @@ function describeError(code: CodespaceErrorCode | undefined): string | null {
       return "Gave up after several reconnect attempts. Verify the codespace is running on github.com.";
     case "reconnect-failed":
       return "Last reconnect attempt failed. Click Reconnect to try again.";
+    case "codespace-unavailable":
+      return "Codespace is no longer Available (stopped, deleted, or otherwise unreachable). Auto-reconnect was skipped on purpose to avoid silently restarting it. Start the codespace on github.com or in VS Code, then click Reconnect.";
+    case "state-check-failed":
+      return "Couldn't reach the GitHub API to check codespace state. Auto-reconnect was skipped to avoid resurrecting a stopped codespace. Click Reconnect once your network is back.";
     default:
       return null;
   }

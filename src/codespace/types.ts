@@ -76,7 +76,21 @@ export type CodespaceErrorCode =
   | "remote-config-failed"
   | "ssh-tunnel-failed"
   | "max-reconnect-reached"
-  | "reconnect-failed";
+  | "reconnect-failed"
+  /**
+   * The SSH tunnel went down and a state check found the codespace is no
+   * longer Available (Shutdown/Starting/Failed/etc.) or has been deleted.
+   * We deliberately do NOT auto-reconnect in this case (would resurrect a
+   * stopped codespace), so we surface the reason as an error terminal state
+   * rather than silently dropping the entry.
+   */
+  | "codespace-unavailable"
+  /**
+   * The SSH tunnel went down and we couldn't reach the GitHub API to verify
+   * codespace state. We don't auto-reconnect (could resurrect a stopped
+   * codespace) but we leave a visible error so the user can take action.
+   */
+  | "state-check-failed";
 
 export interface CodespaceConnection {
   id: string;

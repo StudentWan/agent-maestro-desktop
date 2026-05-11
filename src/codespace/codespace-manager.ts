@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
 import { SshTunnel } from "./ssh-tunnel";
-import { listCodespaces as ghListCodespaces, executeRemoteCommand, startCodespace as ghStartCodespace } from "./gh-cli";
+import {
+  listCodespaces as ghListCodespaces,
+  executeRemoteCommand,
+  startCodespace as ghStartCodespace,
+  probeReverseTunnel,
+} from "./gh-cli";
 import {
   buildWriteConfigScript,
   buildWriteOnboardingScript,
@@ -217,7 +222,18 @@ export class CodespaceManager extends EventEmitter {
       });
       this.publish(connection);
 
-      tunnel = new SshTunnel(info.name, remotePort, localPort, this.getToken);
+      tunnel = new SshTunnel(
+        info.name,
+        remotePort,
+        localPort,
+        this.getToken,
+        // End-to-end readiness probe: verify the reverse port is actually
+        // accepting connections inside the codespace before declaring the
+        // tunnel "connected". Without this, a fast user who runs `claude`
+        // immediately after the UI says "connected" can race the kernel
+        // setting up the listening socket and bypass the proxy.
+        () => probeReverseTunnel(info.name, remotePort, 25, this.getToken()),
+      );
 
       let portConflict = false;
       tunnel.on("portConflict", () => {
@@ -226,14 +242,32 @@ export class CodespaceManager extends EventEmitter {
 
       try {
         await tunnel.connect();
-        if (!portConflict) break;
-      } catch {
+        if (!portConflict && tunnel.isConnected()) break;
+        if (!portConflict) {
+          // Probe-not-ready / SSH-handshake-not-confirmed path: the process
+          // is still alive but the tunnel never proved itself. Tear down so
+          // we don't lie to the user about being connected.
+          tunnel.disconnect();
+          this.freePort(remotePort);
+          this.connections.delete(info.name);
+          const errConn = updateConnection(connection, {
+            connectionState: "error",
+            errorCode: "ssh-tunnel-failed",
+            errorMessage:
+              "SSH tunnel did not become ready within the timeout " +
+              "(reverse port forward never accepted connections inside the codespace)",
+            progress: undefined,
+          });
+          this.publish(errConn);
+          throw new Error("SSH tunnel did not become ready");
+        }
+      } catch (err) {
         if (!portConflict) {
           // Drop the placeholder entry before throwing so the UI doesn't
           // see a phantom in-flight row.
           this.connections.delete(info.name);
           this.freePort(remotePort);
-          throw new Error("SSH tunnel failed to establish");
+          throw err instanceof Error ? err : new Error("SSH tunnel failed to establish");
         }
       }
 
@@ -460,18 +494,26 @@ export class CodespaceManager extends EventEmitter {
     }
 
     if (!isAvailable) {
-      console.log(`[CodespaceManager] ${name} is no longer Available — disconnecting`);
+      console.log(
+        `[${new Date().toISOString()}] [CodespaceManager] healthCheck(${name}): codespace no longer Available — disconnecting and surfacing as error/codespace-unavailable`,
+      );
       // Tear down without going through `gh codespace ssh` for remote
       // cleanup (the codespace is gone — exec would either fail or, worse,
-      // wake it back up).
+      // wake it back up). Keep the entry in error state so the UI shows a
+      // visible reason instead of the row vanishing.
       if (entry.healthTimer) clearInterval(entry.healthTimer);
       entry.tunnel?.disconnect();
       this.freePort(entry.connection.remotePort);
       const finalConn = updateConnection(entry.connection, {
-        connectionState: "available",
+        connectionState: "error",
+        errorCode: "codespace-unavailable",
+        errorMessage:
+          "Codespace is no longer Available (stopped, deleted, or otherwise unreachable). Click Reconnect when ready.",
+        progress: undefined,
       });
-      this.connections.delete(name);
+      this.connections.set(name, { connection: finalConn, tunnel: null, healthTimer: null });
       this.publish(finalConn);
+      this.emit("connectionError", { name, message: finalConn.errorMessage! });
       return;
     }
 
@@ -481,7 +523,17 @@ export class CodespaceManager extends EventEmitter {
 
   private async handleUnexpectedDisconnect(name: string, model: string): Promise<void> {
     const entry = this.connections.get(name);
-    if (!entry) return;
+    if (!entry) {
+      console.log(
+        `[${new Date().toISOString()}] [CodespaceManager] handleUnexpectedDisconnect(${name}): no entry, ignoring`,
+      );
+      return;
+    }
+
+    console.log(
+      `[${new Date().toISOString()}] [CodespaceManager] handleUnexpectedDisconnect(${name}): tunnel died, beginning reconnect flow ` +
+        `(prior reconnectAttempts=${entry.connection.reconnectAttempts}, source=${entry.connection.source})`,
+    );
 
     // Mark as reconnecting + checking-state up front so the UI shows
     // something more specific than a stale "connected" while we query
@@ -499,33 +551,61 @@ export class CodespaceManager extends EventEmitter {
     // we ended up auto-resurrecting codespaces the user had just stopped
     // from VS Code or the GitHub web UI. Authoritative state check first.
     let isAvailable = true;
+    let stateCheckFailed = false;
+    let observedState: string | undefined;
     try {
       const list = await ghListCodespaces(this.getToken());
       const fresh = list.find((cs) => cs.name === name);
-      // Treat "not in list" as not available either (deleted codespace).
+      observedState = fresh?.state ?? "(not in list)";
       isAvailable = fresh?.state === "Available";
+      console.log(
+        `[${new Date().toISOString()}] [CodespaceManager] handleUnexpectedDisconnect(${name}): state=${observedState}, isAvailable=${isAvailable}`,
+      );
     } catch (err) {
       // Network/API failure: be conservative and DO NOT reconnect, since a
       // reconnect could resurrect a stopped codespace. The user can always
       // reconnect manually if they really wanted to stay connected.
-      console.warn(`[CodespaceManager] State check failed for ${name}, skipping reconnect:`, err);
+      console.warn(
+        `[${new Date().toISOString()}] [CodespaceManager] handleUnexpectedDisconnect(${name}): state check failed, skipping reconnect:`,
+        err,
+      );
+      stateCheckFailed = true;
       isAvailable = false;
     }
 
     if (!isAvailable) {
-      console.log(`[CodespaceManager] ${name} is no longer Available — cleaning up tunnel without reconnect`);
-      // Mirror the disconnect() bookkeeping but skip the remote-cleanup
-      // exec (the remote side is gone) and skip the disconnecting/available
-      // emit dance so the UI sees a clean removal.
+      // Previously this branch silently deleted the entry — UI saw the row
+      // disappear and the bare "Connect" button reappear with no hint why.
+      // Now we leave the entry in a terminal `error` state with a specific
+      // errorCode/errorMessage so the user knows what happened and can pick
+      // Reconnect or Dismiss.
+      const errorCode = stateCheckFailed ? "state-check-failed" : "codespace-unavailable";
+      const errorMessage = stateCheckFailed
+        ? "GitHub API unreachable while checking codespace state — auto-reconnect skipped to avoid resurrecting a stopped codespace. Click Reconnect when ready."
+        : `Codespace state is "${observedState ?? "unknown"}" (not Available) — auto-reconnect skipped to avoid resurrecting a stopped codespace.`;
+
+      console.log(
+        `[${new Date().toISOString()}] [CodespaceManager] handleUnexpectedDisconnect(${name}): leaving in error/${errorCode}, NOT auto-reconnecting`,
+      );
+
+      // Tear down the tunnel and free the port, but KEEP the entry so the
+      // UI can show the failure and offer Reconnect/Dismiss. Don't run
+      // remote cleanup via `gh codespace ssh` — it would either fail or,
+      // worse, wake the codespace back up.
       if (entry.healthTimer) clearInterval(entry.healthTimer);
       entry.tunnel?.disconnect();
       this.freePort(entry.connection.remotePort);
       const finalConn = updateConnection(entry.connection, {
-        connectionState: "available",
+        connectionState: "error",
+        errorCode,
+        errorMessage,
         progress: undefined,
       });
-      this.connections.delete(name);
+      // Drop the live tunnel/healthTimer refs but keep the connection entry
+      // so getConnections() and the UI continue to show the row.
+      this.connections.set(name, { connection: finalConn, tunnel: null, healthTimer: null });
       this.publish(finalConn);
+      this.emit("connectionError", { name, message: errorMessage });
       return;
     }
 
@@ -576,8 +656,18 @@ export class CodespaceManager extends EventEmitter {
       this.connections.set(name, { ...entry, connection: updated });
       this.publish(updated);
 
-      const tunnel = new SshTunnel(name, newPort, updated.localPort, this.getToken);
+      const tunnel = new SshTunnel(
+        name,
+        newPort,
+        updated.localPort,
+        this.getToken,
+        () => probeReverseTunnel(name, newPort, 25, this.getToken()),
+      );
       await tunnel.connect();
+      if (!tunnel.isConnected()) {
+        tunnel.disconnect();
+        throw new Error("SSH tunnel did not become ready on reconnect");
+      }
       this.updateEntry(name, { tunnel });
 
       // Use the same retry-and-verify path as the initial connect — a

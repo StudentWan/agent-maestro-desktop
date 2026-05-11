@@ -210,6 +210,85 @@ describe("VsCodeCodespaceDetector", () => {
     expect(det.getCurrent().size).toBe(0);
   });
 
+  it("holds previous state when both enumeration sources fail (no spurious empty emit)", async () => {
+    // Regression for the wild-caught log line:
+    //   [AutoBridge] grace expired for ... (state=connected) — disconnecting
+    // The detector emitting `Map()` because PowerShell hiccuped tricked
+    // the auto-bridge into starting a grace timer, which then disconnected
+    // a perfectly healthy connection. Now: if we have NO information
+    // (both sources failed), we must keep emitting the previous state.
+    let titlesFail = false;
+    let processesFail = false;
+    const det = new VsCodeCodespaceDetector({
+      listWindowTitles: async () => {
+        if (titlesFail) throw new Error("user32 not available");
+        return [
+          "src/main.ts - my-repo [Codespaces: foo-bar-baz-q] - Visual Studio Code",
+        ];
+      },
+      listProcesses: async () => {
+        if (processesFail) throw new Error("WMI hiccup");
+        return [];
+      },
+      listCodespaces: async () => [csInfo("foo-bar-baz-q")],
+    });
+
+    // First tick: detector sees the codespace.
+    await det.tick();
+    expect(det.getCurrent().has("foo-bar-baz-q")).toBe(true);
+
+    let changedEmits = 0;
+    det.on("changed", () => {
+      changedEmits++;
+    });
+
+    // Both sources fail: detector must NOT emit an empty map. Previous
+    // state stays in `current`, and no `changed` event fires.
+    titlesFail = true;
+    processesFail = true;
+    await det.tick();
+    expect(det.getCurrent().has("foo-bar-baz-q")).toBe(true);
+    expect(changedEmits).toBe(0);
+
+    // Sources recover, codespace still there: still no change.
+    titlesFail = false;
+    processesFail = false;
+    await det.tick();
+    expect(det.getCurrent().has("foo-bar-baz-q")).toBe(true);
+    expect(changedEmits).toBe(0);
+  });
+
+  it("holds previous state when one source fails and the other returns empty (ambiguous → defer)", async () => {
+    let titlesFail = false;
+    const det = new VsCodeCodespaceDetector({
+      listWindowTitles: async () => {
+        if (titlesFail) throw new Error("user32 not available");
+        return [
+          "src/main.ts - my-repo [Codespaces: foo-bar-baz-q] - Visual Studio Code",
+        ];
+      },
+      // Process enumeration returns [] (modern VS Code Codespaces extension
+      // doesn't expose codespace name in process command lines).
+      listProcesses: async () => [],
+      listCodespaces: async () => [csInfo("foo-bar-baz-q")],
+    });
+
+    await det.tick();
+    expect(det.getCurrent().has("foo-bar-baz-q")).toBe(true);
+
+    let changedEmits = 0;
+    det.on("changed", () => {
+      changedEmits++;
+    });
+
+    // Window-title source fails, process source returns []. We have NO
+    // reliable signal — must hold previous state, not emit empty.
+    titlesFail = true;
+    await det.tick();
+    expect(det.getCurrent().has("foo-bar-baz-q")).toBe(true);
+    expect(changedEmits).toBe(0);
+  });
+
   it("survives listWindowTitles errors and falls back to processes", async () => {
     const det = new VsCodeCodespaceDetector({
       listWindowTitles: async () => {

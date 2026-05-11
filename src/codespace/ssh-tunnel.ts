@@ -9,15 +9,29 @@ export class SshTunnel extends EventEmitter {
   private state: CodespaceConnectionState = "available";
   private intentionalDisconnect = false;
   private readonly getToken: (() => string | undefined) | undefined;
+  /**
+   * Optional end-to-end readiness probe. When provided, `connect()` will not
+   * mark the tunnel as connected on the 30s timeout — it will wait for the
+   * probe to return true (fast path: ~1s) or for the timeout to fire (the
+   * tunnel is then left in "connecting" so the caller can detect failure
+   * via `isConnected()`).
+   *
+   * The probe should verify the reverse port forward is actually listening
+   * inside the codespace. Returning false means "give up", returning true
+   * promotes the tunnel to "connected" immediately.
+   */
+  private readonly probeReady: (() => Promise<boolean>) | undefined;
 
   constructor(
     public readonly codespaceName: string,
     public readonly remotePort: number,
     public readonly localPort: number,
     getToken?: () => string | undefined,
+    probeReady?: () => Promise<boolean>,
   ) {
     super();
     this.getToken = getToken;
+    this.probeReady = probeReady;
   }
 
   getState(): CodespaceConnectionState {
@@ -37,7 +51,7 @@ export class SshTunnel extends EventEmitter {
 
     this.process.stderr?.on("data", (data: Buffer) => {
       const msg = data.toString();
-      console.log(`[SSHTunnel:${this.codespaceName}] stderr: ${msg.trim()}`);
+      console.log(`[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] stderr: ${msg.trim()}`);
 
       if (msg.includes("bind: Address already in use")) {
         this.emit("portConflict", this.remotePort);
@@ -45,11 +59,13 @@ export class SshTunnel extends EventEmitter {
     });
 
     this.process.stdout?.on("data", (data: Buffer) => {
-      console.log(`[SSHTunnel:${this.codespaceName}] stdout: ${data.toString().trim()}`);
+      console.log(`[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] stdout: ${data.toString().trim()}`);
     });
 
     this.process.on("exit", (code, signal) => {
-      console.log(`[SSHTunnel:${this.codespaceName}] exited code=${code} signal=${signal}`);
+      console.log(
+        `[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] process exited code=${code} signal=${signal} intentional=${this.intentionalDisconnect}`,
+      );
       this.process = null;
 
       if (!this.intentionalDisconnect) {
@@ -59,17 +75,31 @@ export class SshTunnel extends EventEmitter {
     });
 
     this.process.on("error", (err) => {
-      console.error(`[SSHTunnel:${this.codespaceName}] error:`, err.message);
+      console.error(`[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] process error:`, err.message);
       this.process = null;
       this.setState("error");
     });
 
     return new Promise<void>((resolve) => {
+      // The 30s timeout is now a HARD UPPER BOUND, not a "we're ready" signal.
+      // Whether we mark the tunnel as connected on timeout depends on whether
+      // a readiness probe was supplied and what it returned.
       const timeout = setTimeout(() => {
-        // If process is still running after timeout, consider it connected
-        if (this.process && !this.process.killed) {
+        if (!this.process || this.process.killed) {
+          // Process died during the wait — exit handler already set "error".
+          resolve();
+          return;
+        }
+        if (!this.probeReady) {
+          // No probe configured: preserve legacy behavior so callers that
+          // don't opt in (e.g. tests) still see "connected" after the
+          // timeout window. The caller's own verification step (e.g.
+          // writeRemoteConfigWithRetry) is the real gate in that case.
           this.markConnected();
         }
+        // With a probe configured but no successful result by 30s, leave the
+        // state as "connecting" — the probe loop will either flip us to
+        // connected when it succeeds, or the caller will tear us down.
         resolve();
       }, SSH_TUNNEL_CONNECT_TIMEOUT_MS);
 
@@ -86,6 +116,38 @@ export class SshTunnel extends EventEmitter {
         this.process?.removeListener("exit", earlyExitHandler);
         resolve();
       });
+
+      // Run the readiness probe in parallel with the timeout. As soon as it
+      // returns true we promote to connected and resolve immediately — no
+      // need to burn the full 30s when the tunnel bound in 800ms. As soon
+      // as it gives up we resolve with the tunnel still in "connecting", so
+      // the caller's `isConnected()` check fails fast and the connect path
+      // can mark this as ssh-tunnel-failed instead of misleading the user.
+      if (this.probeReady) {
+        const probe = this.probeReady;
+        void (async () => {
+          try {
+            const ok = await probe();
+            if (!ok) {
+              // Probe gave up before the timeout. Resolve so the caller can
+              // distinguish "tunnel not ready" from "still trying" via
+              // isConnected().
+              clearTimeout(timeout);
+              this.process?.removeListener("exit", earlyExitHandler);
+              resolve();
+              return;
+            }
+            if (this.process && !this.process.killed && this.state !== "connected") {
+              this.markConnected();
+            }
+          } catch {
+            // Probe threw — treat as "not ready", same as ok===false.
+            clearTimeout(timeout);
+            this.process?.removeListener("exit", earlyExitHandler);
+            resolve();
+          }
+        })();
+      }
     });
   }
 

@@ -84,6 +84,50 @@ export class AutoBridgeOrchestrator {
       if (this.pendingDisconnects.has(name)) continue;
       const timer = setTimeout(() => {
         this.pendingDisconnects.delete(name);
+
+        // Race guard: if the connection is currently in `reconnecting`, the
+        // manager is actively trying to recover from a tunnel drop. Calling
+        // disconnect() here would cancel that recovery — exactly the wrong
+        // outcome. Skip; if VS Code is really gone, the next tick will see
+        // the entry in a different state and retry the grace timer.
+        const conn = this.manager.getConnection(name);
+        if (conn?.connectionState === "reconnecting") {
+          console.log(
+            `[${new Date().toISOString()}] [AutoBridge] grace expired for ${name} but connection is reconnecting — skipping disconnect to avoid racing recovery`,
+          );
+          return;
+        }
+
+        // Second-look guard: a single missed tick can be a transient
+        // detector blip (PowerShell hiccup, VS Code briefly without a
+        // [Codespaces:] title because Output panel grabbed focus, codespace
+        // momentarily reported as Updating). Re-check the detector's
+        // current snapshot; if it now sees the codespace again, abandon
+        // this disconnect — VS Code never actually went away.
+        if (this.detector.getCurrent().has(name)) {
+          console.log(
+            `[${new Date().toISOString()}] [AutoBridge] grace expired for ${name} but detector now sees it again — abandoning disconnect (likely transient detector miss)`,
+          );
+          return;
+        }
+
+        // Health-trumps-detection guard: if the connection is still
+        // `connected` after the grace window, the SSH tunnel is alive and
+        // the proxy is working. Detector saying "VS Code is gone" while the
+        // tunnel is still healthy is more often a detector false-negative
+        // than the user actually closing VS Code. Skip this round; if it
+        // really is gone the next tick will keep currentSet empty and the
+        // next grace cycle will get another chance.
+        if (conn?.connectionState === "connected") {
+          console.log(
+            `[${new Date().toISOString()}] [AutoBridge] grace expired for ${name} but connection is healthy (state=connected) — deferring disconnect, will re-evaluate on next detector tick`,
+          );
+          return;
+        }
+
+        console.log(
+          `[${new Date().toISOString()}] [AutoBridge] grace expired for ${name} (state=${conn?.connectionState ?? "missing"}) — disconnecting`,
+        );
         void this.manager.disconnect(name).catch((err) => {
           console.warn(`[AutoBridge] disconnect ${name} failed:`, err);
         });

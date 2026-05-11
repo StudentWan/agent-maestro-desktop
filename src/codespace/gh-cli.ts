@@ -158,3 +158,45 @@ export async function executeRemoteCommand(
   );
   return stdout;
 }
+
+/**
+ * Verify the reverse SSH tunnel is actually accepting connections by opening
+ * a TCP socket to 127.0.0.1:remotePort *from inside the codespace*. A bare
+ * SSH process being alive does NOT imply `-R` has bound and is forwarding —
+ * the kernel may not have set up the listening socket yet when SSH first
+ * reports the channel as open.
+ *
+ * Implemented as a single SSH exec running a bash loop in the codespace, so
+ * a fast-bound tunnel returns in ~1s without spamming SSH with poll-per-tick
+ * sessions. The bash loop polls every 500ms for at most `timeoutSec` seconds.
+ *
+ * Returns true iff the codespace observed a successful connect within the
+ * window. Any error (SSH failure, gh CLI hiccup) yields false — the caller
+ * decides what to do with that.
+ */
+export async function probeReverseTunnel(
+  codespaceName: string,
+  remotePort: number,
+  timeoutSec: number,
+  token?: string,
+): Promise<boolean> {
+  const iterations = Math.max(1, Math.floor(timeoutSec * 2));
+  // Single quotes inside the bash -c string are safe because we wrap with
+  // double quotes; the inner script does not need any host-side variable
+  // expansion (REMOTE_PORT is a JS template substitution, not a shell var).
+  const script =
+    `for i in $(seq 1 ${iterations}); do ` +
+    `if (exec 3<>/dev/tcp/127.0.0.1/${remotePort}) 2>/dev/null; then ` +
+    `exec 3<&-; exec 3>&-; echo READY; exit 0; fi; ` +
+    `sleep 0.5; done; echo NOT_READY; exit 1`;
+  const cmd = `bash -c '${script}'`;
+  // Generous overhead over the bash loop so the SSH exec itself isn't what
+  // times out: bash needs ≈ timeoutSec, SSH handshake adds a few seconds.
+  const sshTimeoutMs = (timeoutSec + 10) * 1000;
+  try {
+    const out = await executeRemoteCommand(codespaceName, cmd, sshTimeoutMs, token);
+    return out.includes("READY");
+  } catch {
+    return false;
+  }
+}

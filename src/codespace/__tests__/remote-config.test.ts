@@ -21,6 +21,17 @@ describe("buildWriteConfigScript", () => {
     expect(script).not.toContain("'quotes");
     expect(script).toContain("model-with");
   });
+
+  it("uses atomic os.replace + tempfile so concurrent readers never see a half-written file", () => {
+    const script = buildWriteConfigScript(23337, "claude-sonnet-4-20250514");
+    // Atomicity contract: tempfile staging, fsync flush, rename swap.
+    expect(script).toContain("tempfile.mkstemp");
+    expect(script).toContain("os.replace");
+    expect(script).toContain("os.fsync");
+    // The legacy non-atomic pattern (`open(p, 'w')`) must not be used to
+    // write the target — only as a read source.
+    expect(script).not.toMatch(/json\.dump\([^,]+,\s*open\(p,\s*['"]w['"]\)/);
+  });
 });
 
 describe("buildRemoveConfigScript", () => {
@@ -29,6 +40,12 @@ describe("buildRemoveConfigScript", () => {
     expect(script).toContain("python3 -c");
     expect(script).toContain("AGENT_MAESTRO_MANAGED");
     expect(script).toContain("pop");
+  });
+
+  it("writes atomically", () => {
+    const script = buildRemoveConfigScript();
+    expect(script).toContain("os.replace");
+    expect(script).toContain("tempfile.mkstemp");
   });
 });
 
@@ -40,6 +57,11 @@ describe("buildUpdateModelScript", () => {
     expect(script).toContain("claude-opus-4-20250514");
     expect(script).toContain("AGENT_MAESTRO_MANAGED");
   });
+
+  it("writes atomically", () => {
+    const script = buildUpdateModelScript("claude-opus-4-20250514");
+    expect(script).toContain("os.replace");
+  });
 });
 
 describe("buildWriteOnboardingScript", () => {
@@ -48,5 +70,10 @@ describe("buildWriteOnboardingScript", () => {
     expect(script).toContain("python3 -c");
     expect(script).toContain("hasCompletedOnboarding");
     expect(script).toContain(".claude.json");
+  });
+
+  it("writes atomically", () => {
+    const script = buildWriteOnboardingScript();
+    expect(script).toContain("os.replace");
   });
 });

@@ -35,7 +35,20 @@ const config: ForgeConfig = {
   },
   makers: [
     new MakerSquirrel({
+      // `name` controls the NuGet package id Squirrel uses internally and
+      // — critically — the install directory under %LocalAppData%. Keeping
+      // it stable across versions avoids old install dirs being left behind.
+      // Must be a single token (no spaces).
+      name: "AgentMaestroDesktop",
+      // `exe` is the produced exe filename Squirrel will reference; it MUST
+      // match `packagerConfig.name` (with the `.exe` suffix) so install-time
+      // shortcut creation finds the binary.
+      exe: "Agent Maestro Desktop.exe",
       setupIcon: "assets/icons/icon.ico",
+      // setupExe controls the user-facing installer filename. Without this
+      // it defaults to `<name>-<version> Setup.exe` which uses the NuGet
+      // id (no spaces); we want the friendly name in the download.
+      setupExe: "Agent Maestro Desktop Setup.exe",
     }),
     new MakerZIP({}, ["darwin", "linux"]),
   ],

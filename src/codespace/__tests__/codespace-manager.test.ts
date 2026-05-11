@@ -134,9 +134,16 @@ describe("CodespaceManager", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(tunnelInstances).toHaveLength(1);
-    expect(manager.getConnections()).toEqual([]);
+    // New contract: instead of silently deleting the entry (UI loses the row
+    // with no explanation), keep it in `error / codespace-unavailable` so the
+    // user can see why and choose Reconnect or Dismiss. Auto-reconnect is
+    // still skipped — that part is the safety property we mustn't regress.
+    const conns = manager.getConnections();
+    expect(conns).toHaveLength(1);
+    expect(conns[0].connectionState).toBe("error");
+    expect(conns[0].errorCode).toBe("codespace-unavailable");
     const lastConn = events[events.length - 1];
-    expect(lastConn.connectionState).toBe("available");
+    expect(lastConn.connectionState).toBe("error");
   });
 
   it("does NOT reconnect when state check fails (be conservative)", async () => {
@@ -179,7 +186,14 @@ describe("CodespaceManager", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(tunnelInstances).toHaveLength(1);
-    expect(manager.getConnections()).toEqual([]);
+    // Same new contract as the previous test: keep the entry visible in
+    // error state, but distinguish the cause — here the API itself failed
+    // so the errorCode is `state-check-failed` rather than
+    // `codespace-unavailable`. Either way auto-reconnect is skipped.
+    const conns = manager.getConnections();
+    expect(conns).toHaveLength(1);
+    expect(conns[0].connectionState).toBe("error");
+    expect(conns[0].errorCode).toBe("state-check-failed");
   });
 
   it("connect() tears down when remote-config write never verifies (user not misled)", async () => {

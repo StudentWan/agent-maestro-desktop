@@ -91,4 +91,81 @@ describe("SshTunnel", () => {
 
     expect(mockProc.kill).toHaveBeenCalled();
   });
+
+  it("promotes to connected as soon as the readiness probe returns true (fast path)", async () => {
+    const mockProc = createMockProcess();
+    mockSpawnSshTunnel.mockReturnValue(mockProc as any);
+
+    const probe = vi.fn().mockResolvedValue(true);
+    const tunnel = new SshTunnel(
+      "my-codespace",
+      23337,
+      23337,
+      undefined,
+      probe,
+    );
+    const onState = vi.fn();
+    tunnel.on("stateChanged", onState);
+
+    const connectPromise = tunnel.connect();
+    // Drain the microtask queue so the probe's resolved promise runs.
+    await vi.advanceTimersByTimeAsync(0);
+    await connectPromise;
+
+    expect(probe).toHaveBeenCalled();
+    expect(onState).toHaveBeenCalledWith("connected");
+    expect(tunnel.isConnected()).toBe(true);
+  });
+
+  it("does NOT mark connected when the probe returns false (no more lying about readiness)", async () => {
+    const mockProc = createMockProcess();
+    mockSpawnSshTunnel.mockReturnValue(mockProc as any);
+
+    const probe = vi.fn().mockResolvedValue(false);
+    const tunnel = new SshTunnel(
+      "my-codespace",
+      23337,
+      23337,
+      undefined,
+      probe,
+    );
+    const onState = vi.fn();
+    tunnel.on("stateChanged", onState);
+
+    const connectPromise = tunnel.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    await connectPromise;
+
+    // Connect resolved, but tunnel never became connected.
+    expect(probe).toHaveBeenCalled();
+    expect(onState).not.toHaveBeenCalledWith("connected");
+    expect(tunnel.isConnected()).toBe(false);
+  });
+
+  it("does NOT mark connected on timeout when a probe is configured (avoid bypassing the gate)", async () => {
+    const mockProc = createMockProcess();
+    mockSpawnSshTunnel.mockReturnValue(mockProc as any);
+
+    // Probe never resolves within the test window — simulates "tunnel still
+    // not bound after 30s".
+    const probe = vi.fn().mockImplementation(() => new Promise<boolean>(() => {}));
+    const tunnel = new SshTunnel(
+      "my-codespace",
+      23337,
+      23337,
+      undefined,
+      probe,
+    );
+    const onState = vi.fn();
+    tunnel.on("stateChanged", onState);
+
+    const connectPromise = tunnel.connect();
+    // Trip the 30s timeout. Without a probe, this would mark connected.
+    // With a probe, it must NOT.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await connectPromise;
+
+    expect(onState).not.toHaveBeenCalledWith("connected");
+    expect(tunnel.isConnected()).toBe(false);
+  });
 });

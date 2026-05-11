@@ -160,9 +160,13 @@ export class VsCodeCodespaceDetector extends EventEmitter {
     this.inFlight = true;
     try {
       // Primary: window titles (works for VS Code Codespaces extension).
-      const titles = await this.safeListWindowTitles();
+      // Capture failure separately from "no titles": a PowerShell hiccup
+      // returning [] while VS Code is actually open with a Codespace would
+      // otherwise look identical to "user closed VS Code", and the
+      // auto-bridge would happily disconnect a healthy connection.
+      const titlesResult = await this.safeListWindowTitlesResult();
       const titleCandidates = new Set<string>();
-      for (const title of titles) {
+      for (const title of titlesResult.titles) {
         const name = extractCodespaceDisplayNameFromTitle(title);
         if (name) titleCandidates.add(name);
       }
@@ -172,17 +176,37 @@ export class VsCodeCodespaceDetector extends EventEmitter {
       // tunnels and keep the auto-bridge alive even after the user closes
       // VS Code.
       const excludePids = this.getExcludePidsFn();
-      const processes = await this.safeListProcesses();
+      const processesResult = await this.safeListProcessesResult();
       const cmdCandidates = new Set<string>();
-      for (const p of processes) {
+      for (const p of processesResult.processes) {
         if (excludePids.has(p.pid)) continue;
         for (const name of extractCandidateNames(p.command)) {
           cmdCandidates.add(name);
         }
       }
 
+      // If BOTH enumeration sources failed, we have no information about
+      // what's really running. Holding the previous state is much safer
+      // than emitting "" and letting auto-bridge tear down good connections.
+      if (titlesResult.failed && processesResult.failed) {
+        console.warn(
+          `[${new Date().toISOString()}] [VsCodeCodespaceDetector] both window-title and process enumeration failed this tick — holding previous state (had ${this.current.size} entries) to avoid spurious disconnects`,
+        );
+        return;
+      }
+
       const allCandidates = new Set<string>([...titleCandidates, ...cmdCandidates]);
       if (allCandidates.size === 0) {
+        // Genuinely nothing detected — emit empty to drive grace timers.
+        // But if exactly one source failed AND the other is empty, that's
+        // also ambiguous: hold previous state instead of emitting empty,
+        // because a single failed source can hide the real candidates.
+        if ((titlesResult.failed || processesResult.failed) && this.current.size > 0) {
+          console.warn(
+            `[${new Date().toISOString()}] [VsCodeCodespaceDetector] one enumeration source failed and the other returned empty — holding previous state (${this.current.size} entries) to avoid spurious disconnects`,
+          );
+          return;
+        }
         this.maybeEmit(new Map());
         return;
       }
@@ -267,6 +291,36 @@ export class VsCodeCodespaceDetector extends EventEmitter {
     } catch (err) {
       console.warn("[VsCodeCodespaceDetector] listWindowTitles failed:", err);
       return [];
+    }
+  }
+
+  /**
+   * Like safeListProcesses but reports whether the underlying call threw.
+   * Used by tick() to distinguish "successfully observed empty" from
+   * "couldn't observe at all" — only the former is a real signal that
+   * VS Code is gone.
+   */
+  private async safeListProcessesResult(): Promise<{ processes: ProcessInfo[]; failed: boolean }> {
+    try {
+      return { processes: await this.listProcessesFn(), failed: false };
+    } catch (err) {
+      console.warn(
+        `[${new Date().toISOString()}] [VsCodeCodespaceDetector] listProcesses failed:`,
+        err,
+      );
+      return { processes: [], failed: true };
+    }
+  }
+
+  private async safeListWindowTitlesResult(): Promise<{ titles: string[]; failed: boolean }> {
+    try {
+      return { titles: await this.listWindowTitlesFn(), failed: false };
+    } catch (err) {
+      console.warn(
+        `[${new Date().toISOString()}] [VsCodeCodespaceDetector] listWindowTitles failed:`,
+        err,
+      );
+      return { titles: [], failed: true };
     }
   }
 

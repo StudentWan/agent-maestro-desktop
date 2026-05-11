@@ -61,6 +61,9 @@ class FakeManager {
   getConnections() {
     return this.connections.slice();
   }
+  getConnection(name: string) {
+    return this.connections.find((c) => c.id === name);
+  }
 }
 
 describe("AutoBridgeOrchestrator", () => {
@@ -93,7 +96,14 @@ describe("AutoBridgeOrchestrator", () => {
     );
   });
 
-  it("schedules disconnect after graceMs when codespace vanishes", async () => {
+  it("does NOT disconnect a healthy `connected` entry when detection blips (defers instead)", async () => {
+    // Regression for the "[AutoBridge] grace expired ... (state=connected) —
+    // disconnecting" log we saw in the wild: detector momentarily lost the
+    // codespace (PowerShell hiccup, or VS Code title temporarily without
+    // [Codespaces:] tag), grace timer fired, and a perfectly healthy
+    // connection got torn down. Now grace expiry on a `connected` entry is
+    // deferred — only really-gone (state != connected) entries get the
+    // disconnect.
     const det = new FakeDetector();
     const mgr = new FakeManager();
     mgr.connections.push(makeConn("foo-bar-baz-q", "vscode-auto"));
@@ -112,6 +122,41 @@ describe("AutoBridgeOrchestrator", () => {
     await Promise.resolve();
     expect(orch.getPendingDisconnects().has("foo-bar-baz-q")).toBe(true);
     expect(mgr.disconnectMock).not.toHaveBeenCalled();
+
+    // Detector still sees nothing; grace timer fires.
+    await vi.advanceTimersByTimeAsync(5001);
+
+    // Connection is `connected`, so disconnect MUST be deferred. The user
+    // never closed VS Code — we just blinked.
+    expect(mgr.disconnectMock).not.toHaveBeenCalled();
+  });
+
+  it("disconnects a non-connected entry when grace expires (e.g. connection still in connecting phase)", async () => {
+    // The flip side of the previous test: only `connected` entries get the
+    // "defer disconnect" treatment. Entries in transient states still get
+    // cleaned up when grace expires so we don't leak placeholder rows.
+    const det = new FakeDetector();
+    const mgr = new FakeManager();
+    const conn = makeConn("foo-bar-baz-q", "vscode-auto");
+    // `connecting` is a transient state autoBridge treats as "blocking"
+    // (won't try to reconnect), so the orchestrator sees the entry on
+    // startup but doesn't race with a stale-error cleanup.
+    conn.connectionState = "connecting";
+    mgr.connections.push(conn);
+    det.current = new Map([["foo-bar-baz-q", csInfo("foo-bar-baz-q")]]);
+
+    const orch = new AutoBridgeOrchestrator(
+      det as never,
+      mgr as never,
+      { graceMs: 5000, getModel: () => "m" },
+    );
+    orch.start();
+    await Promise.resolve();
+    expect(mgr.disconnectMock).not.toHaveBeenCalled();
+
+    det.emitSet(new Map());
+    await Promise.resolve();
+    expect(orch.getPendingDisconnects().has("foo-bar-baz-q")).toBe(true);
 
     await vi.advanceTimersByTimeAsync(5001);
     expect(mgr.disconnectMock).toHaveBeenCalledWith("foo-bar-baz-q");
@@ -242,5 +287,43 @@ describe("AutoBridgeOrchestrator", () => {
       "m",
       "vscode-auto",
     );
+  });
+
+  it("does NOT race-disconnect a connection that is currently reconnecting", async () => {
+    // Regression: the manager's handleUnexpectedDisconnect kicks in when the
+    // SSH tunnel dies and walks the connection through "reconnecting → ...
+    // → connected". If VS Code's window title also briefly disappeared at
+    // the same time (extension reload, worker restart), the orchestrator's
+    // grace timer would fire and call disconnect(), tearing down the
+    // recovery in progress. Now the timer skips the call when state is
+    // "reconnecting".
+    const det = new FakeDetector();
+    const mgr = new FakeManager();
+    const conn = makeConn("foo-bar-baz-q", "vscode-auto");
+    mgr.connections.push(conn);
+    det.current = new Map([["foo-bar-baz-q", csInfo("foo-bar-baz-q")]]);
+
+    const orch = new AutoBridgeOrchestrator(
+      det as never,
+      mgr as never,
+      { graceMs: 5000, getModel: () => "m" },
+    );
+    orch.start();
+    await Promise.resolve();
+
+    // Codespace appears to vanish from VS Code → grace timer scheduled.
+    det.emitSet(new Map());
+    await Promise.resolve();
+    expect(orch.getPendingDisconnects().has("foo-bar-baz-q")).toBe(true);
+
+    // Manager has, in parallel, decided it's reconnecting.
+    conn.connectionState = "reconnecting";
+
+    // Grace expires.
+    await vi.advanceTimersByTimeAsync(5001);
+
+    // disconnect must NOT have been called — that would have killed the
+    // in-flight reconnect.
+    expect(mgr.disconnectMock).not.toHaveBeenCalled();
   });
 });
