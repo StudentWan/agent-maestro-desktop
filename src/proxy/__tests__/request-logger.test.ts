@@ -139,7 +139,7 @@ describe('request-logger middleware', () => {
     expect(entry.error).toBe('context_length_exceeded')
   })
 
-  it('falls back to "unknown" when route does not set loggedModel', async () => {
+  it('falls back to request method and path when route does not set loggedModel', async () => {
     const logCallback = vi.fn()
     const app = new Hono()
 
@@ -149,6 +149,6 @@ describe('request-logger middleware', () => {
     await app.request('/health')
 
     const entry = logCallback.mock.calls[0][0]
-    expect(entry.model).toBe('unknown')
+    expect(entry.model).toBe('GET /health')
   })
 })

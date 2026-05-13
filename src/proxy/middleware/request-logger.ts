@@ -53,7 +53,7 @@ export function createRequestLogger(onLog: LogCallback) {
       return;
     }
 
-    const model = c.get("loggedModel") ?? "unknown";
+    const model = c.get("loggedModel") ?? formatRequestLabel(c.req.method, c.req.path);
     const stream =
       c.get("loggedStream") ??
       (c.req.header("accept")?.includes("text/event-stream") ?? false);
@@ -79,4 +79,8 @@ export function createRequestLogger(onLog: LogCallback) {
 
     onLog(entry);
   };
+}
+
+function formatRequestLabel(method: string, path: string): string {
+  return `${method.toUpperCase()} ${path}`;
 }
