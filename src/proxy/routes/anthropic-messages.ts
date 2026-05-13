@@ -46,6 +46,10 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
     // Surface metadata to the request-logger middleware (which runs after us).
     c.set("loggedModel", originalModel);
     c.set("loggedStream", isStream);
+    const thinkingLevel = resolveLoggedThinkingLevel(requestBody);
+    if (thinkingLevel) {
+      c.set("loggedThinkingLevel", thinkingLevel);
+    }
 
     try {
       const headers: Record<string, string | undefined> = {
@@ -249,4 +253,46 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
 
 function isClaudeModel(model: string): boolean {
   return model.toLowerCase().includes("claude");
+}
+
+function resolveLoggedThinkingLevel(request: AnthropicRequest): string | undefined {
+  const requestedEffort = request.output_config?.effort;
+  if (typeof requestedEffort === "string" && requestedEffort.length > 0) {
+    return requestedEffort;
+  }
+
+  const model = request.model.toLowerCase();
+  if (model.includes("opus-4.7-xhigh")) {
+    return "xhigh";
+  }
+  if (model.includes("opus-4.7-high")) {
+    return "high";
+  }
+
+  if (!request.thinking) {
+    return undefined;
+  }
+
+  if (request.thinking.type === "disabled") {
+    return "off";
+  }
+
+  if (request.thinking.type === "enabled" || request.thinking.type === "adaptive") {
+    return resolveThinkingEffort(request.thinking.budget_tokens);
+  }
+
+  return request.thinking.type;
+}
+
+function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "medium" | "high" {
+  if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
+    return "medium";
+  }
+  if (budgetTokens >= 16_000) {
+    return "high";
+  }
+  if (budgetTokens >= 4_000) {
+    return "medium";
+  }
+  return "low";
 }

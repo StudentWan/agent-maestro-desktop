@@ -125,6 +125,7 @@ describe('request-logger middleware', () => {
       c.set('loggedModel', 'claude-haiku-4')
       c.set('loggedInputTokens', 1234)
       c.set('loggedOutputTokens', 56)
+      c.set('loggedThinkingLevel', 'xhigh')
       c.set('loggedError', 'context_length_exceeded')
       return c.json({ ok: true })
     })
@@ -134,6 +135,7 @@ describe('request-logger middleware', () => {
     const entry = logCallback.mock.calls[0][0]
     expect(entry.inputTokens).toBe(1234)
     expect(entry.outputTokens).toBe(56)
+    expect(entry.thinkingLevel).toBe('xhigh')
     expect(entry.error).toBe('context_length_exceeded')
   })
 

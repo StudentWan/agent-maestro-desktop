@@ -16,6 +16,7 @@ declare module "hono" {
     loggedStream: boolean;
     loggedInputTokens: number;
     loggedOutputTokens: number;
+    loggedThinkingLevel: string;
     loggedError: string;
   }
 }
@@ -58,6 +59,7 @@ export function createRequestLogger(onLog: LogCallback) {
       (c.req.header("accept")?.includes("text/event-stream") ?? false);
     const inputTokens = c.get("loggedInputTokens");
     const outputTokens = c.get("loggedOutputTokens");
+    const thinkingLevel = c.get("loggedThinkingLevel");
     const error = c.get("loggedError");
 
     const entry: RequestLogEntry = {
@@ -71,6 +73,7 @@ export function createRequestLogger(onLog: LogCallback) {
       stream,
       inputTokens,
       outputTokens,
+      thinkingLevel,
       error,
     };
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { registerMessagesRoute } from '../routes/anthropic-messages'
+import { createRequestLogger } from '../middleware/request-logger'
 
 describe('anthropic messages route', () => {
   it('returns 401 when no copilot client is set', async () => {
@@ -75,6 +76,42 @@ describe('anthropic messages route', () => {
       expect.objectContaining({ model: 'claude-sonnet-4-6' }),
       { anthropicBeta: undefined },
     )
+  })
+
+  it('logs requested thinking effort', async () => {
+    const logCallback = vi.fn()
+    const mockClient = {
+      anthropicMessages: vi.fn().mockResolvedValue({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4.7-1m-internal',
+        content: [{ type: 'text', text: 'Hello!' }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }),
+    }
+
+    const app = new Hono()
+    app.use('*', createRequestLogger(logCallback))
+    registerMessagesRoute(app, () => mockClient as any)
+
+    const res = await app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-opus-4.7-1m-internal',
+        output_config: { effort: 'xhigh' },
+        thinking: { type: 'enabled', budget_tokens: 16000 },
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100,
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(logCallback).toHaveBeenCalledTimes(1)
+    expect(logCallback.mock.calls[0][0].thinkingLevel).toBe('xhigh')
   })
 
   it('returns 502 when copilot API throws', async () => {
