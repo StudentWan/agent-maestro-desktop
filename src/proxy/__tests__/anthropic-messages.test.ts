@@ -78,7 +78,7 @@ describe('anthropic messages route', () => {
     )
   })
 
-  it('logs requested thinking effort', async () => {
+  it('logs xhigh from Claude Code xhigh thinking budget', async () => {
     const logCallback = vi.fn()
     const mockClient = {
       anthropicMessages: vi.fn().mockResolvedValue({
@@ -102,8 +102,7 @@ describe('anthropic messages route', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-opus-4.7-1m-internal',
-        output_config: { effort: 'xhigh' },
-        thinking: { type: 'enabled', budget_tokens: 16000 },
+        thinking: { type: 'enabled', budget_tokens: 31999 },
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 100,
       }),

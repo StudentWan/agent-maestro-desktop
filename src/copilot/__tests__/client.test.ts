@@ -319,6 +319,30 @@ describe('CopilotClient', () => {
       expect(body.output_config).toEqual({ effort: expectedEffort })
     })
 
+    it('infers xhigh effort from Claude Code xhigh thinking budget for Opus 4.7 1M', async () => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4.7-1m-internal',
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages({
+        model: 'claude-opus-4.7-1m-internal',
+        thinking: { type: 'enabled', budget_tokens: 31999 },
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+      })
+
+      const fetchCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.output_config).toEqual({ effort: 'xhigh' })
+    })
+
     it('sends streaming Anthropic Messages request and returns raw Response', async () => {
       const mockResponse = {
         ok: true,

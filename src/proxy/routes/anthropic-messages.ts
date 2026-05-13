@@ -278,15 +278,18 @@ function resolveLoggedThinkingLevel(request: AnthropicRequest): string | undefin
   }
 
   if (request.thinking.type === "enabled" || request.thinking.type === "adaptive") {
-    return resolveThinkingEffort(request.thinking.budget_tokens);
+    return resolveThinkingEffort(request.model, request.thinking.budget_tokens);
   }
 
   return request.thinking.type;
 }
 
-function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "medium" | "high" {
+function resolveThinkingEffort(model: string, budgetTokens: number | undefined): "low" | "medium" | "high" | "xhigh" {
   if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
     return "medium";
+  }
+  if (supportsXHighThinkingBudget(model) && budgetTokens >= 30_000) {
+    return "xhigh";
   }
   if (budgetTokens >= 16_000) {
     return "high";
@@ -295,4 +298,9 @@ function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "mediu
     return "medium";
   }
   return "low";
+}
+
+function supportsXHighThinkingBudget(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized.includes("opus-4.7-1m") || normalized.includes("opus-4.7-xhigh");
 }

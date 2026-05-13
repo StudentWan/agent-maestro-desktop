@@ -90,7 +90,7 @@ function adaptThinkingForCopilot(request: AnthropicRequest): AnthropicRequest {
     thinking: { ...thinking, type: "adaptive" },
     output_config: {
       ...request.output_config,
-      effort: request.output_config?.effort ?? resolveThinkingEffort(budgetTokens),
+      effort: request.output_config?.effort ?? resolveThinkingEffort(request.model, budgetTokens),
     },
   };
 }
@@ -145,9 +145,15 @@ function resolveCopilotReasoningEffort(
   return requestedEffort;
 }
 
-function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "medium" | "high" {
+function resolveThinkingEffort(
+  model: string,
+  budgetTokens: number | undefined,
+): AnthropicOutputConfig["effort"] {
   if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
     return "medium";
+  }
+  if (supportsXHighThinkingBudget(model) && budgetTokens >= 30_000) {
+    return "xhigh";
   }
   if (budgetTokens >= 16_000) {
     return "high";
@@ -156,6 +162,11 @@ function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "mediu
     return "medium";
   }
   return "low";
+}
+
+function supportsXHighThinkingBudget(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized.includes("opus-4.7-1m") || normalized.includes("opus-4.7-xhigh");
 }
 
 /**
