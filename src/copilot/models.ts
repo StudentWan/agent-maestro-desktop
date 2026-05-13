@@ -1,8 +1,14 @@
-import { EDITOR_VERSION, EDITOR_PLUGIN_VERSION, APP_USER_AGENT, MACHINE_ID } from "../shared/constants";
+import {
+  APP_USER_AGENT,
+  COPILOT_DEFAULT_API_BASE_URL,
+  EDITOR_PLUGIN_VERSION,
+  EDITOR_VERSION,
+} from "../shared/constants";
 import type { ModelInfo } from "../shared/types";
 import type { TokenManager } from "./token-manager";
+import type { CopilotToken } from "./types";
 
-const COPILOT_MODELS_URL = "https://api.githubcopilot.com/models";
+const LEGACY_COPILOT_MODELS_URL = "https://api.githubcopilot.com/models";
 
 interface CopilotModelEntry {
   id: string;
@@ -18,11 +24,12 @@ interface CopilotModelEntry {
  * Fetch available models from the Copilot API and filter for Claude models
  */
 export async function fetchAvailableModels(tokenManager: TokenManager): Promise<ModelInfo[]> {
-  const token = await tokenManager.getToken();
+  const tokenBundle = await resolveTokenBundle(tokenManager);
+  const modelsUrl = resolveCopilotModelsUrl(tokenBundle.baseUrl);
 
-  const response = await fetch(COPILOT_MODELS_URL, {
+  let response = await fetch(modelsUrl, {
     headers: {
-      "Authorization": `Bearer ${token}`,
+      "Authorization": `Bearer ${tokenBundle.token}`,
       "Accept": "application/json",
       "Editor-Version": EDITOR_VERSION,
       "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
@@ -31,6 +38,20 @@ export async function fetchAvailableModels(tokenManager: TokenManager): Promise<
       "Copilot-Integration-Id": "vscode-chat",
     },
   });
+
+  if (!response.ok && modelsUrl !== LEGACY_COPILOT_MODELS_URL && response.status === 404) {
+    response = await fetch(LEGACY_COPILOT_MODELS_URL, {
+      headers: {
+        "Authorization": `Bearer ${tokenBundle.token}`,
+        "Accept": "application/json",
+        "Editor-Version": EDITOR_VERSION,
+        "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
+        "User-Agent": APP_USER_AGENT,
+        "Openai-Organization": "github-copilot",
+        "Copilot-Integration-Id": "vscode-chat",
+      },
+    });
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -49,4 +70,21 @@ export async function fetchAvailableModels(tokenManager: TokenManager): Promise<
     }));
 
   return claudeModels;
+}
+
+async function resolveTokenBundle(tokenManager: TokenManager): Promise<Pick<CopilotToken, "token" | "baseUrl">> {
+  const provider = tokenManager as TokenManager & {
+    getTokenBundle?: () => Promise<CopilotToken>;
+  };
+  if (typeof provider.getTokenBundle === "function") {
+    return provider.getTokenBundle();
+  }
+  return {
+    token: await tokenManager.getToken(),
+    baseUrl: COPILOT_DEFAULT_API_BASE_URL,
+  };
+}
+
+function resolveCopilotModelsUrl(baseUrl: string): string {
+  return `${baseUrl.trim().replace(/\/+$/, "")}/models`;
 }

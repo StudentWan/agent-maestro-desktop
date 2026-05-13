@@ -18,6 +18,7 @@ export const REQUIRED_CODESPACE_SCOPES = ["codespace"] as const;
 
 // Copilot API
 export const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
+export const COPILOT_DEFAULT_API_BASE_URL = "https://api.individual.githubcopilot.com";
 export const COPILOT_CHAT_URL = "https://api.githubcopilot.com/chat/completions";
 
 // Proxy

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { TokenManager } from '../token-manager'
+import { TokenManager, deriveCopilotApiBaseUrlFromToken } from '../token-manager'
 
 // Mock global fetch
 const mockFetch = vi.fn()
@@ -35,9 +35,47 @@ describe('TokenManager', () => {
 
     expect(token.token).toBe('jwt-token-123')
     expect(token.expiresAt).toBe(futureExpiry)
+    expect(token.baseUrl).toBe('https://api.individual.githubcopilot.com')
     expect(mockFetch).toHaveBeenCalledTimes(1)
 
     manager.dispose()
+  })
+
+  it('derives Copilot API base URL from proxy endpoint token metadata', async () => {
+    const futureExpiry = Math.floor(Date.now() / 1000) + 1800
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({
+        token: 'tid=1;proxy-ep=proxy.business.githubcopilot.com;sku=pro;:signature',
+        expires_at: futureExpiry,
+      }),
+    )
+
+    const manager = new TokenManager('github-access-token')
+    const token = await manager.initialize()
+
+    expect(token.baseUrl).toBe('https://api.business.githubcopilot.com')
+    expect(await manager.getTokenBundle()).toBe(token)
+
+    manager.dispose()
+  })
+
+  it('normalizes millisecond and string expires_at values', async () => {
+    const futureExpiry = Math.floor(Date.now() / 1000) + 1800
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({ token: 'token', expires_at: String(futureExpiry * 1000) }),
+    )
+
+    const manager = new TokenManager('github-access-token')
+    const token = await manager.initialize()
+
+    expect(token.expiresAt).toBe(futureExpiry)
+
+    manager.dispose()
+  })
+
+  it('returns null for invalid proxy endpoint metadata', () => {
+    expect(deriveCopilotApiBaseUrlFromToken('tid=1;proxy-ep=ftp://proxy.example.com;')).toBeNull()
+    expect(deriveCopilotApiBaseUrlFromToken('tid=1;')).toBeNull()
   })
 
   it('getToken returns cached token when not expired', async () => {

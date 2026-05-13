@@ -1,6 +1,7 @@
 export interface CopilotToken {
   token: string;
   expiresAt: number;
+  baseUrl: string;
 }
 
 export interface DeviceFlowState {

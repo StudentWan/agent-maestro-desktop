@@ -9,6 +9,7 @@ It proxies Anthropic API requests and allows you to access Claude Code using a G
 
 Key features:
 - Local Claude API proxy with Copilot token authentication
+- Claude prompt caching via Copilot's Anthropic Messages API
 - Auto-configures proxy settings for Claude Code, VSCode extension, and local CLI
 - Multi-model auto-detection and selection (automatically picks the best model after login)
 - Intuitive UI with request logs, model switching, and settings panel
