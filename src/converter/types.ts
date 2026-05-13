@@ -13,6 +13,7 @@ export interface AnthropicRequest {
   metadata?: Record<string, unknown>;
   thinking?: AnthropicThinkingConfig;
   output_config?: AnthropicOutputConfig;
+  context_management?: AnthropicContextManagement;
 }
 
 export interface AnthropicMessage {
@@ -87,6 +88,10 @@ export interface AnthropicThinkingConfig {
 
 export interface AnthropicOutputConfig {
   effort?: "low" | "medium" | "high";
+  [key: string]: unknown;
+}
+
+export interface AnthropicContextManagement {
   [key: string]: unknown;
 }
 

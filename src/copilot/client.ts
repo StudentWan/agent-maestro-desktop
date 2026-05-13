@@ -39,7 +39,7 @@ function prepareCopilotAnthropicRequest(
     model: resolveCopilotClaudeModel(request.model, options),
     stream,
   });
-  return adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest));
+  return normalizeReasoningForCopilot(adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest)));
 }
 
 function stripUnsupportedCopilotTools(request: AnthropicRequest): AnthropicRequest {
@@ -93,6 +93,33 @@ function adaptThinkingForCopilot(request: AnthropicRequest): AnthropicRequest {
       effort: request.output_config?.effort ?? resolveThinkingEffort(budgetTokens),
     },
   };
+}
+
+function normalizeReasoningForCopilot(request: AnthropicRequest): AnthropicRequest {
+  if (supportsCopilotReasoning(request.model)) {
+    return request;
+  }
+
+  if (!request.thinking && !request.output_config?.effort) {
+    return request;
+  }
+
+  const { effort: _effort, ...outputConfig } = request.output_config ?? {};
+  const nextRequest: AnthropicRequest = { ...request };
+  delete nextRequest.thinking;
+  delete nextRequest.context_management;
+
+  if (Object.keys(outputConfig).length > 0) {
+    nextRequest.output_config = outputConfig;
+  } else {
+    delete nextRequest.output_config;
+  }
+
+  return nextRequest;
+}
+
+function supportsCopilotReasoning(model: string): boolean {
+  return /claude-(?:opus|sonnet)/i.test(model);
 }
 
 function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "medium" | "high" {

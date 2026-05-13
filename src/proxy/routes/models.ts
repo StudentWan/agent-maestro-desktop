@@ -26,12 +26,6 @@ export function registerModelsRoutes(app: Hono) {
         owned_by: "anthropic",
       },
       {
-        id: "claude-sonnet-4-6-1m",
-        object: "model",
-        created: Date.now(),
-        owned_by: "anthropic",
-      },
-      {
         id: "claude-haiku-4-5-20251001",
         object: "model",
         created: Date.now(),

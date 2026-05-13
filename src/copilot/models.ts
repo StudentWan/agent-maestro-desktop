@@ -61,9 +61,9 @@ export async function fetchAvailableModels(tokenManager: TokenManager): Promise<
   const data = await response.json() as { data?: CopilotModelEntry[] };
   const allModels = data.data ?? [];
 
-  // Filter for Claude models only
+  // Filter for Claude models that the Copilot Anthropic Messages endpoint accepts.
   const claudeModels = allModels
-    .filter((m) => m.id.toLowerCase().includes("claude"))
+    .filter((m) => isSupportedCopilotClaudeModel(m.id))
     .map((m) => ({
       id: m.id,
       name: m.name || m.id,
@@ -87,4 +87,9 @@ async function resolveTokenBundle(tokenManager: TokenManager): Promise<Pick<Copi
 
 function resolveCopilotModelsUrl(baseUrl: string): string {
   return `${baseUrl.trim().replace(/\/+$/, "")}/models`;
+}
+
+function isSupportedCopilotClaudeModel(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+  return normalized.includes("claude") && normalized !== "claude-sonnet-4-6-1m";
 }

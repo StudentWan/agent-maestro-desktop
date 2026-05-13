@@ -257,6 +257,35 @@ describe('CopilotClient', () => {
       expect(body.tool_choice).toBeUndefined()
     })
 
+    it('strips reasoning effort for Haiku models because Copilot does not support it', async () => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-haiku-4.5',
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages({
+        model: 'claude-haiku-4-5-20251001',
+        thinking: { type: 'enabled', budget_tokens: 16000 },
+        output_config: { effort: 'high' },
+        context_management: { edits: [{ type: 'clear_thinking_20251015' }] },
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+      })
+
+      const fetchCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.model).toBe('claude-haiku-4.5')
+      expect(body.thinking).toBeUndefined()
+      expect(body.output_config).toBeUndefined()
+      expect(body.context_management).toBeUndefined()
+    })
+
     it('sends streaming Anthropic Messages request and returns raw Response', async () => {
       const mockResponse = {
         ok: true,

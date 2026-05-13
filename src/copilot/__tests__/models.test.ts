@@ -29,6 +29,7 @@ describe('fetchAvailableModels', () => {
       data: [
         { id: 'gpt-4.1', name: 'GPT-4.1', version: '1.0' },
         { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', version: '1.0' },
+        { id: 'claude-sonnet-4-6-1m', name: 'Claude Sonnet 4.6 1M', version: '1.0' },
         { id: 'gpt-4o-mini', name: 'GPT-4o Mini', version: '1.0' },
         { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', version: '1.0' },
       ],
