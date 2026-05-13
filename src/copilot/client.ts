@@ -9,7 +9,7 @@ import {
 import { applyCopilotPromptCache } from "./prompt-cache";
 import type { CopilotCompletionRequest, CopilotCompletionResponse, CopilotStreamChunk } from "./types";
 import { TokenManager } from "./token-manager";
-import type { AnthropicRequest, AnthropicResponse } from "../converter/types";
+import type { AnthropicOutputConfig, AnthropicRequest, AnthropicResponse } from "../converter/types";
 import { mapModelName } from "../converter/model-mapper";
 
 function resolveAnthropicMessagesUrl(baseUrl: string): string {
@@ -96,12 +96,19 @@ function adaptThinkingForCopilot(request: AnthropicRequest): AnthropicRequest {
 }
 
 function normalizeReasoningForCopilot(request: AnthropicRequest): AnthropicRequest {
-  if (supportsCopilotReasoning(request.model)) {
+  if (!request.thinking && !request.output_config?.effort) {
     return request;
   }
 
-  if (!request.thinking && !request.output_config?.effort) {
-    return request;
+  const effort = resolveCopilotReasoningEffort(request.model, request.output_config?.effort);
+  if (effort) {
+    return {
+      ...request,
+      output_config: {
+        ...request.output_config,
+        effort,
+      },
+    };
   }
 
   const { effort: _effort, ...outputConfig } = request.output_config ?? {};
@@ -118,8 +125,24 @@ function normalizeReasoningForCopilot(request: AnthropicRequest): AnthropicReque
   return nextRequest;
 }
 
-function supportsCopilotReasoning(model: string): boolean {
-  return /claude-(?:opus|sonnet)/i.test(model);
+function resolveCopilotReasoningEffort(
+  model: string,
+  requestedEffort: AnthropicOutputConfig["effort"],
+): AnthropicOutputConfig["effort"] | undefined {
+  const normalized = model.toLowerCase();
+  if (normalized.includes("haiku") || normalized.includes("sonnet-4.5") || normalized.includes("opus-4.5")) {
+    return undefined;
+  }
+  if (normalized.includes("opus-4.7-xhigh")) {
+    return "xhigh";
+  }
+  if (normalized.includes("opus-4.7-high")) {
+    return "high";
+  }
+  if (normalized === "claude-opus-4.7") {
+    return "medium";
+  }
+  return requestedEffort;
 }
 
 function resolveThinkingEffort(budgetTokens: number | undefined): "low" | "medium" | "high" {

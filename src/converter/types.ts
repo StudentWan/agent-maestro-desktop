@@ -87,7 +87,7 @@ export interface AnthropicThinkingConfig {
 }
 
 export interface AnthropicOutputConfig {
-  effort?: "low" | "medium" | "high";
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   [key: string]: unknown;
 }
 

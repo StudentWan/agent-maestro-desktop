@@ -257,12 +257,16 @@ describe('CopilotClient', () => {
       expect(body.tool_choice).toBeUndefined()
     })
 
-    it('strips reasoning effort for Haiku models because Copilot does not support it', async () => {
+    it.each([
+      ['claude-haiku-4-5-20251001', 'claude-haiku-4.5'],
+      ['claude-sonnet-4.5', 'claude-sonnet-4.5'],
+      ['claude-opus-4.5', 'claude-opus-4.5'],
+    ])('strips reasoning effort for %s because Copilot does not support it', async (requestedModel, copilotModel) => {
       mockFetch.mockResolvedValueOnce(createFetchResponse({
         id: 'msg_123',
         type: 'message',
         role: 'assistant',
-        model: 'claude-haiku-4.5',
+        model: copilotModel,
         content: [],
         stop_reason: 'end_turn',
         stop_sequence: null,
@@ -270,7 +274,7 @@ describe('CopilotClient', () => {
       }))
 
       await client.anthropicMessages({
-        model: 'claude-haiku-4-5-20251001',
+        model: requestedModel,
         thinking: { type: 'enabled', budget_tokens: 16000 },
         output_config: { effort: 'high' },
         context_management: { edits: [{ type: 'clear_thinking_20251015' }] },
@@ -280,10 +284,39 @@ describe('CopilotClient', () => {
 
       const fetchCall = mockFetch.mock.calls[0]
       const body = JSON.parse(fetchCall[1].body)
-      expect(body.model).toBe('claude-haiku-4.5')
+      expect(body.model).toBe(copilotModel)
       expect(body.thinking).toBeUndefined()
       expect(body.output_config).toBeUndefined()
       expect(body.context_management).toBeUndefined()
+    })
+
+    it.each([
+      ['claude-opus-4.7', 'medium'],
+      ['claude-opus-4.7-high', 'high'],
+      ['claude-opus-4.7-xhigh', 'xhigh'],
+    ])('normalizes reasoning effort for %s', async (requestedModel, expectedEffort) => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: requestedModel,
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages({
+        model: requestedModel,
+        thinking: { type: 'enabled', budget_tokens: 16000 },
+        output_config: { effort: 'high' },
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+      })
+
+      const fetchCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.output_config).toEqual({ effort: expectedEffort })
     })
 
     it('sends streaming Anthropic Messages request and returns raw Response', async () => {
