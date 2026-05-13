@@ -15,4 +15,12 @@ describe('health route', () => {
     expect(body.timestamp).toBeDefined()
     expect(typeof body.timestamp).toBe('number')
   })
+
+  it('accepts root HEAD probes from Claude Code', async () => {
+    const app = new Hono()
+    registerHealthRoutes(app)
+
+    const res = await app.request('/', { method: 'HEAD' })
+    expect(res.status).toBe(204)
+  })
 })

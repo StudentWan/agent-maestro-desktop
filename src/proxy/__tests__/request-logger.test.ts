@@ -79,6 +79,25 @@ describe('request-logger middleware', () => {
     expect(id1).not.toBe(id2)
   })
 
+  it('skips Claude Code root HEAD probes', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.all('/', (c) => {
+      if (c.req.method !== 'HEAD') {
+        return c.notFound()
+      }
+
+      return new Response(null, { status: 204 })
+    })
+
+    const res = await app.request('/', { method: 'HEAD' })
+
+    expect(res.status).toBe(204)
+    expect(logCallback).not.toHaveBeenCalled()
+  })
+
   it('reports model from c.set("loggedModel") instead of "unknown"', async () => {
     const logCallback = vi.fn()
     const app = new Hono()

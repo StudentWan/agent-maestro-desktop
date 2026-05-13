@@ -48,6 +48,10 @@ export function createRequestLogger(onLog: LogCallback) {
 
     const duration = Date.now() - start;
 
+    if (c.req.method === "HEAD" && c.req.path === "/") {
+      return;
+    }
+
     const model = c.get("loggedModel") ?? "unknown";
     const stream =
       c.get("loggedStream") ??
