@@ -169,12 +169,12 @@ describe('CopilotClient', () => {
       expect(body.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
     })
 
-    it('resolves context-1m Claude beta requests to Copilot 1M model IDs', async () => {
+    it('resolves context-1m Opus beta requests to supported Copilot 1M model IDs', async () => {
       mockFetch.mockResolvedValueOnce(createFetchResponse({
         id: 'msg_123',
         type: 'message',
         role: 'assistant',
-        model: 'claude-sonnet-4.6-1m',
+        model: 'claude-opus-4.6-1m',
         content: [],
         stop_reason: 'end_turn',
         stop_sequence: null,
@@ -182,6 +182,34 @@ describe('CopilotClient', () => {
       }))
 
       const result = await client.anthropicMessages(
+        {
+          model: 'claude-opus-4-6',
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 100,
+        },
+        { anthropicBeta: 'context-1m-2025-08-07' },
+      )
+
+      const fetchCall = mockFetch.mock.calls[0]
+      expect(fetchCall[1].headers['anthropic-beta']).toBeUndefined()
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.model).toBe('claude-opus-4.6-1m')
+      expect(result.model).toBe('claude-opus-4-6')
+    })
+
+    it('does not rewrite unsupported Sonnet context-1m beta requests to a 1M model ID', async () => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4.6',
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages(
         {
           model: 'claude-sonnet-4-6',
           messages: [{ role: 'user', content: 'Hi' }],
@@ -193,8 +221,59 @@ describe('CopilotClient', () => {
       const fetchCall = mockFetch.mock.calls[0]
       expect(fetchCall[1].headers['anthropic-beta']).toBeUndefined()
       const body = JSON.parse(fetchCall[1].body)
-      expect(body.model).toBe('claude-sonnet-4.6-1m')
-      expect(result.model).toBe('claude-sonnet-4-6')
+      expect(body.model).toBe('claude-sonnet-4.6')
+    })
+
+    it('maps date-suffixed Opus models before applying context-1m rewrite', async () => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4.6-1m',
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages(
+        {
+          model: 'claude-opus-4-6-20260101',
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 100,
+        },
+        { anthropicBeta: 'context-1m-2025-08-07' },
+      )
+
+      const fetchCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.model).toBe('claude-opus-4.6-1m')
+    })
+
+    it('maps Opus 4.7 context-1m beta requests to the Copilot internal 1M model ID', async () => {
+      mockFetch.mockResolvedValueOnce(createFetchResponse({
+        id: 'msg_123',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-4.7-1m-internal',
+        content: [],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+
+      await client.anthropicMessages(
+        {
+          model: 'claude-opus-4-7-20260101',
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 100,
+        },
+        { anthropicBeta: 'context-1m-2025-08-07' },
+      )
+
+      const fetchCall = mockFetch.mock.calls[0]
+      const body = JSON.parse(fetchCall[1].body)
+      expect(body.model).toBe('claude-opus-4.7-1m-internal')
     })
 
     it('adapts unsupported thinking and web search fields for Copilot Anthropic endpoint', async () => {

@@ -18,15 +18,26 @@ function resolveAnthropicMessagesUrl(baseUrl: string): string {
 }
 
 function resolveCopilotClaudeModel(model: string, options: CopilotAnthropicHeaderOptions): string {
-  const resolvedModel =
-    hasContext1mBeta(options.anthropicBeta) && !isOneMillionContextModel(model)
-      ? `${model}-1m`
-      : model;
-  return mapModelName(resolvedModel);
+  const mappedModel = mapModelName(model);
+  if (!hasContext1mBeta(options.anthropicBeta) || isOneMillionContextModel(mappedModel)) {
+    return mappedModel;
+  }
+  return resolveOneMillionContextModel(mappedModel);
 }
 
 function isOneMillionContextModel(model: string): boolean {
   return /(?:^|-)1m(?:-|$)/.test(model);
+}
+
+function resolveOneMillionContextModel(model: string): string {
+  switch (model.toLowerCase()) {
+    case "claude-opus-4.6":
+      return "claude-opus-4.6-1m";
+    case "claude-opus-4.7":
+      return "claude-opus-4.7-1m-internal";
+    default:
+      return model;
+  }
 }
 
 function prepareCopilotAnthropicRequest(
