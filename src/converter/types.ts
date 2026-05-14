@@ -11,6 +11,9 @@ export interface AnthropicRequest {
   tools?: AnthropicToolDef[];
   tool_choice?: { type: string; name?: string };
   metadata?: Record<string, unknown>;
+  thinking?: AnthropicThinkingConfig;
+  output_config?: AnthropicOutputConfig;
+  context_management?: AnthropicContextManagement;
 }
 
 export interface AnthropicMessage {
@@ -40,6 +43,7 @@ export interface AnthropicImageBlock {
     data?: string;
     url?: string;
   };
+  cache_control?: unknown;
 }
 
 export interface AnthropicToolUseBlock {
@@ -54,6 +58,7 @@ export interface AnthropicToolResultBlock {
   tool_use_id: string;
   content?: string | Array<{ type: string; text?: string; [key: string]: unknown }>;
   is_error?: boolean;
+  cache_control?: unknown;
 }
 
 export interface AnthropicThinkingBlock {
@@ -71,6 +76,23 @@ export interface AnthropicToolDef {
   description?: string;
   input_schema?: Record<string, unknown>;
   type?: string;
+  cache_control?: unknown;
+  [key: string]: unknown;
+}
+
+export interface AnthropicThinkingConfig {
+  type: string;
+  budget_tokens?: number;
+  [key: string]: unknown;
+}
+
+export interface AnthropicOutputConfig {
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  [key: string]: unknown;
+}
+
+export interface AnthropicContextManagement {
+  [key: string]: unknown;
 }
 
 export interface AnthropicResponse {

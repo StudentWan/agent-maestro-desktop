@@ -38,7 +38,7 @@ describe('models route', () => {
     const ids = body.data.map((m: any) => m.id)
 
     expect(ids).toContain('claude-opus-4-6-1m')
-    expect(ids).toContain('claude-sonnet-4-6-1m')
+    expect(ids).not.toContain('claude-sonnet-4-6-1m')
   })
 
   it('each model has required fields', async () => {

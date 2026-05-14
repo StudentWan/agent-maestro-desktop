@@ -42,7 +42,8 @@ export default function RequestLog({ logs }: Props) {
           <thead>
             <tr className="text-gray-400 border-b border-gray-700">
               <th className="text-left py-2 pr-4">Time</th>
-              <th className="text-left py-2 pr-4">Model</th>
+              <th className="text-left py-2 pr-4">Model / Request</th>
+              <th className="text-left py-2 pr-4">Thinking</th>
               <th className="text-left py-2 pr-4">Status</th>
               <th className="text-left py-2 pr-4">Duration</th>
               <th className="text-left py-2 pr-4">Stream</th>
@@ -55,6 +56,7 @@ export default function RequestLog({ logs }: Props) {
                   {new Date(log.timestamp).toLocaleTimeString()}
                 </td>
                 <td className="py-2 pr-4 font-mono text-xs">{log.model}</td>
+                <td className="py-2 pr-4 font-mono text-xs">{log.thinkingLevel ?? "-"}</td>
                 <td className="py-2 pr-4">
                   <span
                     className={`text-xs font-mono ${

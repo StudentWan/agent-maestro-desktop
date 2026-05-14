@@ -65,6 +65,7 @@ export interface RequestLogEntry {
   durationMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  thinkingLevel?: string;
   stream: boolean;
   error?: string;
 }

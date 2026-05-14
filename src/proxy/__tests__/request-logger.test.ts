@@ -79,6 +79,25 @@ describe('request-logger middleware', () => {
     expect(id1).not.toBe(id2)
   })
 
+  it('skips Claude Code root HEAD probes', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.all('/', (c) => {
+      if (c.req.method !== 'HEAD') {
+        return c.notFound()
+      }
+
+      return new Response(null, { status: 204 })
+    })
+
+    const res = await app.request('/', { method: 'HEAD' })
+
+    expect(res.status).toBe(204)
+    expect(logCallback).not.toHaveBeenCalled()
+  })
+
   it('reports model from c.set("loggedModel") instead of "unknown"', async () => {
     const logCallback = vi.fn()
     const app = new Hono()
@@ -106,6 +125,7 @@ describe('request-logger middleware', () => {
       c.set('loggedModel', 'claude-haiku-4')
       c.set('loggedInputTokens', 1234)
       c.set('loggedOutputTokens', 56)
+      c.set('loggedThinkingLevel', 'xhigh')
       c.set('loggedError', 'context_length_exceeded')
       return c.json({ ok: true })
     })
@@ -115,10 +135,11 @@ describe('request-logger middleware', () => {
     const entry = logCallback.mock.calls[0][0]
     expect(entry.inputTokens).toBe(1234)
     expect(entry.outputTokens).toBe(56)
+    expect(entry.thinkingLevel).toBe('xhigh')
     expect(entry.error).toBe('context_length_exceeded')
   })
 
-  it('falls back to "unknown" when route does not set loggedModel', async () => {
+  it('falls back to request method and path when route does not set loggedModel', async () => {
     const logCallback = vi.fn()
     const app = new Hono()
 
@@ -128,6 +149,6 @@ describe('request-logger middleware', () => {
     await app.request('/health')
 
     const entry = logCallback.mock.calls[0][0]
-    expect(entry.model).toBe('unknown')
+    expect(entry.model).toBe('GET /health')
   })
 })

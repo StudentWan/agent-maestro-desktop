@@ -46,12 +46,67 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
     // Surface metadata to the request-logger middleware (which runs after us).
     c.set("loggedModel", originalModel);
     c.set("loggedStream", isStream);
+    const thinkingLevel = resolveLoggedThinkingLevel(requestBody);
+    if (thinkingLevel) {
+      c.set("loggedThinkingLevel", thinkingLevel);
+    }
 
     try {
-      // Convert Anthropic request → OpenAI/Copilot request
       const headers: Record<string, string | undefined> = {
         "anthropic-beta": c.req.header("anthropic-beta"),
       };
+
+      if (isClaudeModel(originalModel)) {
+        if (isStream) {
+          const copilotResponse = await client.anthropicMessagesStream(requestBody, {
+            anthropicBeta: headers["anthropic-beta"],
+          });
+
+          if (!copilotResponse.body) {
+            return c.json(
+              { error: { type: "api_error", message: "No response body from Copilot API" } },
+              502,
+            );
+          }
+
+          const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
+          c.set("loggedInputTokens", inputEstimate);
+
+          const reader = copilotResponse.body.getReader();
+          const decoder = new TextDecoder();
+
+          return stream(c, async (s) => {
+            c.header("Content-Type", "text/event-stream");
+            c.header("Cache-Control", "no-cache");
+            c.header("Connection", "keep-alive");
+
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                await s.write(decoder.decode(value, { stream: true }));
+              }
+              const tail = decoder.decode();
+              if (tail) {
+                await s.write(tail);
+              }
+            } catch (error) {
+              console.error("[Messages Route] Stream error:", error);
+            } finally {
+              reader.releaseLock();
+            }
+          });
+        }
+
+        const anthropicResponse = await client.anthropicMessages(requestBody, {
+          anthropicBeta: headers["anthropic-beta"],
+        });
+        c.set("loggedInputTokens", anthropicResponse.usage.input_tokens);
+        c.set("loggedOutputTokens", anthropicResponse.usage.output_tokens);
+        return c.json(anthropicResponse);
+      }
+
+      // Convert non-Claude Anthropic request → OpenAI/Copilot request
       const openaiRequest = convertAnthropicToOpenAI(requestBody, headers);
 
       if (isStream) {
@@ -194,4 +249,58 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
       );
     }
   });
+}
+
+function isClaudeModel(model: string): boolean {
+  return model.toLowerCase().includes("claude");
+}
+
+function resolveLoggedThinkingLevel(request: AnthropicRequest): string | undefined {
+  const requestedEffort = request.output_config?.effort;
+  if (typeof requestedEffort === "string" && requestedEffort.length > 0) {
+    return requestedEffort;
+  }
+
+  const model = request.model.toLowerCase();
+  if (model.includes("opus-4.7-xhigh")) {
+    return "xhigh";
+  }
+  if (model.includes("opus-4.7-high")) {
+    return "high";
+  }
+
+  if (!request.thinking) {
+    return undefined;
+  }
+
+  if (request.thinking.type === "disabled") {
+    return "off";
+  }
+
+  if (request.thinking.type === "enabled" || request.thinking.type === "adaptive") {
+    return resolveThinkingEffort(request.model, request.thinking.budget_tokens);
+  }
+
+  return request.thinking.type;
+}
+
+function resolveThinkingEffort(model: string, budgetTokens: number | undefined): "low" | "medium" | "high" | "xhigh" {
+  if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
+    return "medium";
+  }
+  if (supportsXHighThinkingBudget(model) && budgetTokens >= 30_000) {
+    return "xhigh";
+  }
+  if (budgetTokens >= 16_000) {
+    return "high";
+  }
+  if (budgetTokens >= 4_000) {
+    return "medium";
+  }
+  return "low";
+}
+
+function supportsXHighThinkingBudget(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized.includes("opus-4.7-1m") || normalized.includes("opus-4.7-xhigh");
 }

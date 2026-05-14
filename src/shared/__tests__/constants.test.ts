@@ -4,6 +4,7 @@ import {
   GITHUB_DEVICE_CODE_URL,
   GITHUB_ACCESS_TOKEN_URL,
   GITHUB_DEVICE_VERIFICATION_URL,
+  COPILOT_DEFAULT_API_BASE_URL,
   COPILOT_TOKEN_URL,
   COPILOT_CHAT_URL,
   DEFAULT_PROXY_PORT,
@@ -29,6 +30,7 @@ describe('shared constants', () => {
 
   it('exports Copilot API constants', () => {
     expect(COPILOT_TOKEN_URL).toContain('github.com')
+    expect(COPILOT_DEFAULT_API_BASE_URL).toContain('githubcopilot.com')
     expect(COPILOT_CHAT_URL).toContain('githubcopilot.com')
   })
 
