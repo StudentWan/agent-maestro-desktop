@@ -92,4 +92,94 @@ describe('applyCopilotPromptCache', () => {
     expect((result.system as Array<{ cache_control?: unknown }>)[2]).not.toHaveProperty('cache_control')
     expect((result.messages[0].content as Array<{ cache_control?: unknown }>)[1]).not.toHaveProperty('cache_control')
   })
+
+  // Regression: Claude Code now attaches cache_control markers itself, with
+  // forward-looking sub-fields like `scope` / `ttl`. Anthropic accepts them;
+  // Copilot's Anthropic Messages endpoint rejects with HTTP 400
+  // (`cache_control.ephemeral.scope: Extra inputs are not permitted`).
+  // We must reduce every marker to {type} BEFORE the request leaves us.
+  it('strips unknown cache_control sub-fields like scope/ttl from every marker', () => {
+    const request = {
+      model: 'claude-sonnet-4-6',
+      system: [
+        {
+          type: 'text',
+          text: 'system text',
+          cache_control: { type: 'ephemeral', scope: 'session' },
+        },
+      ],
+      tools: [
+        {
+          name: 'read_file',
+          input_schema: { type: 'object' },
+          cache_control: { type: 'ephemeral', ttl: '5m' },
+        },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'hello',
+              cache_control: { type: 'ephemeral', scope: 'turn', ttl: '1h' },
+            },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    } as unknown as AnthropicRequest
+
+    const result = applyCopilotPromptCache(request)
+
+    const systemBlock = (result.system as Array<{ cache_control?: unknown }>)[0]
+    expect(systemBlock.cache_control).toEqual({ type: 'ephemeral' })
+    expect(result.tools?.[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(
+      (result.messages[0].content as Array<{ cache_control?: unknown }>)[0]
+        .cache_control,
+    ).toEqual({ type: 'ephemeral' })
+
+    // No marker should retain `scope` / `ttl` anywhere in the request.
+    const wireBytes = JSON.stringify(result)
+    expect(wireBytes).not.toMatch(/"scope"\s*:/)
+    expect(wireBytes).not.toMatch(/"ttl"\s*:/)
+  })
+
+  it('drops cache_control entirely when its shape is unrecognisable', () => {
+    const request = {
+      model: 'claude-sonnet-4-6',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            // Missing `type` → not a cache marker we can normalise; drop it.
+            { type: 'text', text: 'hello', cache_control: { ttl: '5m' } },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    } as unknown as AnthropicRequest
+
+    const result = applyCopilotPromptCache(request)
+    const block = (result.messages[0].content as unknown as Array<Record<string, unknown>>)[0]
+    // The marker we removed for being malformed will NOT be re-added by the
+    // budget walker (the trailing-user-block step *does* add a fresh
+    // ephemeral marker, but on the same block — verify the wire is clean).
+    expect(block.cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('preserves a previously-set, already-canonical cache_control unchanged', () => {
+    const request: AnthropicRequest = {
+      model: 'claude-sonnet-4-6',
+      system: [
+        { type: 'text', text: 'a', cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 100,
+    }
+    const result = applyCopilotPromptCache(request)
+    const systemBlock = (result.system as Array<{ cache_control?: unknown }>)[0]
+    expect(systemBlock.cache_control).toEqual({ type: 'ephemeral' })
+  })
 })

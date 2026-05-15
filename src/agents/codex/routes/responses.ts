@@ -1,36 +1,31 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
-import type { CopilotClient } from "../../../copilot/client";
-import {
-  buildResponsesFailureSSE,
-  createResponsesStreamTransformer,
-} from "../converter/stream-transformer";
-import { convertOpenAIToResponses } from "../converter/openai-to-responses";
-import {
-  ResponsesRequestError,
-  convertResponsesToOpenAI,
-} from "../converter/responses-to-openai";
+import type { CopilotResponsesClient } from "../responses-client";
 import type { ResponsesRequest } from "../converter/types";
 
 /**
- * Register the POST /codex/v1/responses route — the OpenAI Responses API
- * endpoint that Codex CLI calls.
+ * Register POST /codex/v1/responses — the OpenAI Responses API endpoint
+ * Codex CLI calls.
  *
- * Mirrors `src/agents/claude/routes/messages.ts`:
- *   - 401 when the proxy isn't authenticated yet
- *   - 400 on invalid JSON or rejected parameters (previous_response_id,
- *     conversation)
- *   - Always sets logged{Model,Stream,InputTokens,OutputTokens} on the
- *     Hono context so the request-logger middleware can render the row
- *   - Streams: pipe Copilot SSE through `createResponsesStreamTransformer`
- *     so Codex sees the proper Responses event sequence
- *   - Non-streaming: convert the single ChatCompletions response via
- *     `convertOpenAIToResponses`
+ * Forwarding strategy: pass the body through to Copilot's native
+ * `/responses` endpoint unchanged. We don't translate to ChatCompletions
+ * because that path 400s for Responses-only models (gpt-5.5 et al.) with
+ * `unsupported_api_for_model`. See `responses-client.ts` for the rationale.
+ *
+ * Mirrors the failure semantics of the Claude Messages route:
+ *   - 401 when not authenticated
+ *   - 400 on invalid JSON or rejected parameters (previous_response_id /
+ *     conversation, since this proxy is stateless)
+ *   - 502 on upstream errors in the non-streaming path
+ *   - SSE-shaped error event in the streaming path so the Codex CLI parser
+ *     surfaces something useful instead of just disconnecting
+ *   - Sets logged{Model,Stream,InputTokens,OutputTokens} on the Hono
+ *     context so request-logger can render the row
  */
 export function registerResponsesRoute(
   app: Hono,
-  getClient: () => Pick<CopilotClient, "chatCompletion" | "chatCompletionStream"> | null,
+  getClient: () => CopilotResponsesClient | null,
 ): void {
   app.post("/codex/v1/responses", async (c: Context) => {
     const client = getClient();
@@ -74,51 +69,64 @@ export function registerResponsesRoute(
       c.set("loggedThinkingLevel", reasoningEffort);
     }
 
-    let openaiRequest;
-    try {
-      openaiRequest = convertResponsesToOpenAI(requestBody);
-    } catch (error) {
-      if (error instanceof ResponsesRequestError) {
-        c.set("loggedError", error.message);
-        return c.json(
-          {
-            error: {
-              type: "invalid_request_error",
-              code: "unsupported_parameter",
-              message: error.message,
-            },
+    if (requestBody.previous_response_id) {
+      const message =
+        "previous_response_id is not supported — Agent Maestro Desktop is stateless. Disable Codex's stored-conversation mode.";
+      c.set("loggedError", message);
+      return c.json(
+        {
+          error: {
+            type: "invalid_request_error",
+            code: "unsupported_parameter",
+            param: "previous_response_id",
+            message,
           },
-          error.status as 400,
-        );
-      }
-      throw error;
+        },
+        400,
+      );
+    }
+    if (requestBody.conversation !== undefined && requestBody.conversation !== null) {
+      const message =
+        "conversation is not supported — Agent Maestro Desktop is stateless. Disable Codex's stored-conversation mode.";
+      c.set("loggedError", message);
+      return c.json(
+        {
+          error: {
+            type: "invalid_request_error",
+            code: "unsupported_parameter",
+            param: "conversation",
+            message,
+          },
+        },
+        400,
+      );
     }
 
     try {
       if (isStream) {
-        const copilotResponse = await client.chatCompletionStream(openaiRequest);
+        const upstream = await client.createResponseStream(requestBody);
 
-        if (!copilotResponse.body) {
+        if (!upstream.body) {
           return c.json(
             {
               error: {
                 type: "api_error",
                 code: "upstream_empty_body",
-                message: "No response body from Copilot API",
+                message: "No response body from Copilot Responses API",
               },
             },
             502,
           );
         }
 
-        // Rough estimate matches Claude's route — request-logger needs SOME
-        // input-token figure to render the row.
+        // Rough estimate so request-logger has something to show. The
+        // upstream `response.completed` event carries the real usage; the
+        // logger only needs a coarse number while the row is in flight.
         const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
         c.set("loggedInputTokens", inputEstimate);
 
-        const transformer = createResponsesStreamTransformer(originalModel);
-        const transformed = copilotResponse.body.pipeThrough(transformer);
-        const reader = transformed.getReader();
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
 
         return stream(c, async (s) => {
           c.header("Content-Type", "text/event-stream");
@@ -129,38 +137,76 @@ export function registerResponsesRoute(
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              await s.write(value);
+              await s.write(decoder.decode(value, { stream: true }));
             }
+            const tail = decoder.decode();
+            if (tail) await s.write(tail);
           } catch (error) {
             console.error("[Codex Responses Route] Stream error:", error);
+          } finally {
+            reader.releaseLock();
           }
         });
       }
 
-      const copilotResponse = await client.chatCompletion(openaiRequest);
-      const responsesResponse = convertOpenAIToResponses(
-        copilotResponse,
-        originalModel,
-      );
-      if (responsesResponse.usage) {
-        c.set("loggedInputTokens", responsesResponse.usage.input_tokens);
-        c.set("loggedOutputTokens", responsesResponse.usage.output_tokens);
+      const responseJson = (await client.createResponse(requestBody)) as {
+        usage?: { input_tokens?: number; output_tokens?: number };
+      };
+      if (responseJson.usage) {
+        if (typeof responseJson.usage.input_tokens === "number") {
+          c.set("loggedInputTokens", responseJson.usage.input_tokens);
+        }
+        if (typeof responseJson.usage.output_tokens === "number") {
+          c.set("loggedOutputTokens", responseJson.usage.output_tokens);
+        }
       }
-      return c.json(responsesResponse);
+      return c.json(responseJson);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("[Codex Responses Route] Error:", message);
       c.set("loggedError", message);
 
       if (isStream) {
-        // Codex CLI is mid-SSE — it expects a `response.failed` event, not a
-        // JSON body. Synthesize one directly so the client's parser stays
-        // happy and surfaces the error to the user.
+        // Codex CLI is mid-SSE; emit a minimal `response.failed` event so
+        // its parser surfaces the reason instead of "stream disconnected
+        // before completion".
         return stream(c, async (s) => {
           c.header("Content-Type", "text/event-stream");
           c.header("Cache-Control", "no-cache");
           c.header("Connection", "keep-alive");
-          await s.write(buildResponsesFailureSSE(originalModel, message));
+          const responseId = `resp_${Date.now()}`;
+          const created = {
+            type: "response.created",
+            sequence_number: 0,
+            response: {
+              id: responseId,
+              object: "response",
+              created_at: Math.floor(Date.now() / 1000),
+              status: "in_progress",
+              model: originalModel,
+              output: [],
+              error: null,
+            },
+          };
+          const failed = {
+            type: "response.failed",
+            sequence_number: 1,
+            response: {
+              id: responseId,
+              object: "response",
+              created_at: Math.floor(Date.now() / 1000),
+              status: "failed",
+              model: originalModel,
+              output: [],
+              error: { code: "server_error", message },
+            },
+          };
+          await s.write(
+            `event: response.created\ndata: ${JSON.stringify(created)}\n\n`,
+          );
+          await s.write(
+            `event: response.failed\ndata: ${JSON.stringify(failed)}\n\n`,
+          );
         });
       }
 
@@ -169,7 +215,7 @@ export function registerResponsesRoute(
           error: {
             type: "api_error",
             code: "upstream_error",
-            message: `Copilot API request failed: ${message}`,
+            message: `Copilot Responses API request failed: ${message}`,
           },
         },
         502,

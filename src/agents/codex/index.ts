@@ -27,6 +27,7 @@ import {
 } from "./remote-config";
 import { registerCodexModelsRoute } from "./routes/models";
 import { registerResponsesRoute } from "./routes/responses";
+import { CopilotResponsesClient } from "./responses-client";
 
 export const codexPlugin: AgentPlugin = {
   id: "codex",
@@ -45,7 +46,7 @@ export const codexPlugin: AgentPlugin = {
     registerResponsesRoute(app, () => {
       const client = getClient();
       if (!client) return null;
-      return client;
+      return new CopilotResponsesClient(client.getTokenManager());
     });
     registerCodexModelsRoute(app, () => {
       const client = getClient();
