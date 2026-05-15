@@ -53,7 +53,16 @@ export class SshTunnel extends EventEmitter {
       const msg = data.toString();
       console.log(`[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] stderr: ${msg.trim()}`);
 
-      if (msg.includes("bind: Address already in use")) {
+      // Detect reverse port forward failures. SSH can report these in
+      // different ways depending on the version and the cause:
+      //   - "bind: Address already in use" — port occupied by another process
+      //   - "Warning: remote port forwarding failed for listen port ..." —
+      //     catch-all (permissions, port in TIME_WAIT, etc.)
+      // Both mean we should retry with a different remote port.
+      if (
+        msg.includes("bind: Address already in use") ||
+        msg.includes("remote port forwarding failed")
+      ) {
         this.emit("portConflict", this.remotePort);
       }
     });
@@ -132,6 +141,11 @@ export class SshTunnel extends EventEmitter {
               // Probe gave up before the timeout. Resolve so the caller can
               // distinguish "tunnel not ready" from "still trying" via
               // isConnected().
+              console.warn(
+                `[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] ` +
+                  `readiness probe returned false — reverse port forward on :${this.remotePort} ` +
+                  `never accepted connections`,
+              );
               clearTimeout(timeout);
               this.process?.removeListener("exit", earlyExitHandler);
               resolve();
@@ -140,8 +154,13 @@ export class SshTunnel extends EventEmitter {
             if (this.process && !this.process.killed && this.state !== "connected") {
               this.markConnected();
             }
-          } catch {
+          } catch (probeErr) {
             // Probe threw — treat as "not ready", same as ok===false.
+            console.warn(
+              `[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] ` +
+                `readiness probe threw:`,
+              probeErr instanceof Error ? probeErr.message : probeErr,
+            );
             clearTimeout(timeout);
             this.process?.removeListener("exit", earlyExitHandler);
             resolve();

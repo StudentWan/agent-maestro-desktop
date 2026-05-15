@@ -195,8 +195,19 @@ export async function probeReverseTunnel(
   const sshTimeoutMs = (timeoutSec + 10) * 1000;
   try {
     const out = await executeRemoteCommand(codespaceName, cmd, sshTimeoutMs, token);
-    return out.includes("READY");
-  } catch {
+    const ready = out.includes("READY");
+    if (!ready) {
+      console.warn(
+        `[probeReverseTunnel] port ${remotePort} on ${codespaceName} not ready after ${timeoutSec}s ` +
+          `(output: ${out.trim().slice(0, 120)})`,
+      );
+    }
+    return ready;
+  } catch (err) {
+    console.warn(
+      `[probeReverseTunnel] probe failed for port ${remotePort} on ${codespaceName}:`,
+      err instanceof Error ? err.message : err,
+    );
     return false;
   }
 }
