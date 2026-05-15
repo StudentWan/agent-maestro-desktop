@@ -65,6 +65,8 @@ export interface CodespaceConnectionProgress {
   maxAttempts?: number;
   /** Optional human-readable hint, e.g. "port 23339 in use, retrying". */
   detail?: string;
+  /** Agent plugin being configured (e.g. "claude", "codex"). */
+  pluginId?: string;
 }
 
 /**

@@ -390,9 +390,9 @@ export class CodespaceManager extends EventEmitter {
       info.name,
       remotePort,
       models,
-      (attempt, phase) => {
+      (attempt, phase, pluginId) => {
         connection = updateConnection(connection, {
-          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
+          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS, pluginId },
         });
         this.publish(connection);
       },
@@ -769,9 +769,9 @@ export class CodespaceManager extends EventEmitter {
       // Use the same retry-and-verify path as the initial connect — a
       // reconnect after the codespace was briefly unreachable is exactly
       // when SSH is least cooperative.
-      await this.writeRemoteConfigWithRetry(name, newPort, models, (attempt, phase) => {
+      await this.writeRemoteConfigWithRetry(name, newPort, models, (attempt, phase, pluginId) => {
         updated = updateConnection(updated, {
-          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
+          progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS, pluginId },
         });
         this.connections.set(name, { ...entry, connection: updated, tunnel });
         this.publish(updated);

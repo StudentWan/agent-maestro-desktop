@@ -72,8 +72,10 @@ function describeProgress(
       return "Allocating local port...";
     case "opening-tunnel":
       return `Opening SSH tunnel${attemptSuffix}${detailSuffix}`;
-    case "writing-config":
-      return `Writing remote Claude config${attemptSuffix}`;
+    case "writing-config": {
+      const agent = progress.pluginId ?? "agent";
+      return `Writing remote ${agent} config${attemptSuffix}`;
+    }
     case "verifying-config":
       return `Verifying remote config landed${attemptSuffix}`;
     case "starting-health-check":

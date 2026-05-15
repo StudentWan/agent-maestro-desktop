@@ -53,7 +53,7 @@ function escapeTomlForPython(value: string): string {
  */
 function buildManagedBlockBody(port: number | null, model: string | null): string {
   const lines: string[] = [];
-  lines.push("# Managed by Agent Maestro Desktop. Do not edit manually —");
+  lines.push("# Managed by Agent Maestro Desktop. Do not edit manually --");
   lines.push("# changes inside this block will be overwritten. Anything OUTSIDE");
   lines.push("# the markers is preserved verbatim.");
   lines.push(`model_provider = "${PROVIDER_NAME}"`);
@@ -114,13 +114,17 @@ def _splice_block(existing, body):
  * `writeModel`.
  */
 function buildSpliceScript(blockBody: string | null): string {
-  // The marker body is embedded as a Python triple-quoted string. We
-  // doubly-escape any embedded triple-quote possibility just in case
-  // (shouldn't happen for our TOML, but cheap insurance).
+  // The marker body is embedded as a Python triple-quoted string inside a
+  // `python3 -c "..."` shell command. Two layers of escaping:
+  //   1. Shell: `"` must become `\"` so it doesn't terminate the outer "...".
+  //      Bash strips the backslash, so Python receives a bare `"` — correct.
+  //   2. Python: guard against `'''` inside the body (shouldn't happen for
+  //      our TOML, but cheap insurance).
+  const shellSafe = blockBody?.replace(/"/g, '\\"') ?? null;
   const safeBody =
-    blockBody === null
+    shellSafe === null
       ? "None"
-      : `'''${blockBody.replace(/'''/g, "'\\''\\''\\'")}'''`;
+      : `'''${shellSafe.replace(/'''/g, "'\\''\\''\\'")}'''`;
   return `python3 -c "
 import os
 ${ATOMIC_DUMP_HELPER}
@@ -174,7 +178,7 @@ except FileNotFoundError:
 m = re.search(r'base_url\\s*=\\s*\\\"http://127\\.0\\.0\\.1:(\\d+)/codex/v1\\\"', existing)
 port_line = ('base_url = \\\"http://127.0.0.1:%s/codex/v1\\\"' % m.group(1)) if m else ''
 body_lines = [
-    '# Managed by Agent Maestro Desktop. Do not edit manually —',
+    '# Managed by Agent Maestro Desktop. Do not edit manually --',
     '# changes inside this block will be overwritten. Anything OUTSIDE',
     '# the markers is preserved verbatim.',
     'model_provider = \\\"${PROVIDER_NAME}\\\"',

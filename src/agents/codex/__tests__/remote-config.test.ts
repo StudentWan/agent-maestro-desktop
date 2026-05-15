@@ -13,7 +13,7 @@ describe("Codex remote-config script generators", () => {
     expect(script).toContain("~/.codex/config.toml");
     expect(script).toContain("agent-maestro");
     expect(script).toContain("http://127.0.0.1:23337/codex/v1");
-    expect(script).toContain('model = "gpt-5"');
+    expect(script).toContain('model = \\"gpt-5\\"');
     expect(script).toContain("__agent_maestro_managed = true");
   });
 
