@@ -26,9 +26,7 @@ const store = new Store<StoreSchema>({
     }
   }
   if (legacy !== undefined) {
-    // electron-store has no `delete()` for a single key on the typed
-    // schema; setting to undefined is the documented escape hatch.
-    store.set("selectedModel", undefined as unknown as string | null);
+    store.delete("selectedModel" as keyof StoreSchema);
   }
 })();
 
