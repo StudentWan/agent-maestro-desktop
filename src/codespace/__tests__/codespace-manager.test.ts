@@ -1,5 +1,37 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CodespaceManager } from "../codespace-manager";
+import type { AgentPlugin } from "../../agents/types";
+
+// Minimal fake Claude plugin so the manager tests don't drag in the real
+// Claude code (we just need a plugin that emits scripts the manager can
+// shell-out and a verify command). Marker stays AGENT_MAESTRO_MANAGED so
+// existing test fixtures (mocked `executeRemoteCommand` returning "1\n"
+// for the verify call) remain valid.
+const CLAUDE_TEST_PLUGIN: AgentPlugin = {
+  id: "claude",
+  displayName: "Claude (test)",
+  routePrefix: "",
+  modelHint: "",
+  registerRoutes: () => {},
+  fetchModels: async () => [],
+  localConfig: {
+    apply: async () => {},
+    remove: async () => {},
+    writeModel: async () => {},
+    getSnippet: () => ({ envVars: {} }),
+  },
+  remoteConfig: {
+    criticalForTunnel: true,
+    buildWriteScript: () => "echo write",
+    buildPostWriteScript: () => "echo onboarding",
+    buildVerifyMarkerCommand: () =>
+      "cat ~/.claude/settings.json 2>/dev/null | grep -c AGENT_MAESTRO_MANAGED || true",
+    buildUpdateModelScript: () => "echo update",
+    buildRemoveScript: () => "echo remove",
+  },
+};
+
+const MODELS = { claude: "claude-opus", codex: "" } as const;
 
 // Mock dependencies
 vi.mock("../gh-cli", () => ({
@@ -36,7 +68,7 @@ describe("CodespaceManager", () => {
   });
 
   it("allocates ports starting from base port", () => {
-    const manager = new CodespaceManager(23337);
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN]);
     const port1 = manager.allocatePort();
     const port2 = manager.allocatePort();
     expect(port1).toBe(23337);
@@ -44,7 +76,7 @@ describe("CodespaceManager", () => {
   });
 
   it("frees and reuses ports", () => {
-    const manager = new CodespaceManager(23337);
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN]);
     const port1 = manager.allocatePort();
     manager.freePort(port1);
     const port2 = manager.allocatePort();
@@ -64,20 +96,20 @@ describe("CodespaceManager", () => {
       },
     ]);
 
-    const manager = new CodespaceManager(23337);
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN]);
     const list = await manager.list();
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe("test-cs");
   });
 
   it("returns empty connections initially", () => {
-    const manager = new CodespaceManager(23337);
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN]);
     const connections = manager.getConnections();
     expect(connections).toEqual([]);
   });
 
   it("kills all tunnels synchronously", () => {
-    const manager = new CodespaceManager(23337);
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN]);
     // Should not throw even with no connections
     manager.killAllTunnels();
     expect(manager.getConnections()).toEqual([]);
@@ -121,11 +153,11 @@ describe("CodespaceManager", () => {
     vi.mocked(listCodespaces).mockResolvedValue([{ ...csInfo, state: "Shutdown" }]);
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "test-token");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "test-token");
     const events: any[] = [];
     manager.on("connectionChanged", (c) => events.push(c));
 
-    await manager.connect(csInfo, "claude-opus");
+    await manager.connect(csInfo, MODELS);
     expect(tunnelInstances).toHaveLength(1);
 
     // Simulate the SSH tunnel dying because user stopped the codespace.
@@ -178,8 +210,8 @@ describe("CodespaceManager", () => {
     vi.mocked(listCodespaces).mockRejectedValue(new Error("API down"));
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "test-token");
-    await manager.connect(csInfo, "claude-opus");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "test-token");
+    await manager.connect(csInfo, MODELS);
 
     tunnelInstances[0].emit("unexpectedExit", 255);
     await new Promise((r) => setTimeout(r, 0));
@@ -220,8 +252,8 @@ describe("CodespaceManager", () => {
     // Verify-grep always returns "0" — marker never lands → retries exhausted.
     vi.mocked(executeRemoteCommand).mockResolvedValue("0\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
-    await expect(manager.connect(csInfo, "claude-opus")).rejects.toThrow(
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
+    await expect(manager.connect(csInfo, MODELS)).rejects.toThrow(
       /Remote config/i,
     );
     // Tunnel must have been torn down — leaving it would mislead the UI.
@@ -262,8 +294,8 @@ describe("CodespaceManager", () => {
       .mockResolvedValueOnce("")     // attempt 2: onboarding
       .mockResolvedValueOnce("1\n"); // attempt 2: verify → ok
 
-    const manager = new CodespaceManager(23337, () => "tok");
-    const result = await manager.connect(csInfo, "claude-opus");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
+    const result = await manager.connect(csInfo, MODELS);
     expect(result.connectionState).toBe("connected");
   }, 30_000);
 
@@ -289,8 +321,8 @@ describe("CodespaceManager", () => {
     vi.mocked(listCodespaces).mockResolvedValue([{ ...csInfo, state: "Shutdown" }]);
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
-    await manager.connect(csInfo, "claude-opus");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
+    await manager.connect(csInfo, MODELS);
 
     vi.mocked(executeRemoteCommand).mockClear();
     await manager.disconnect("test-cs");
@@ -334,8 +366,8 @@ describe("CodespaceManager", () => {
     };
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
-    const connectPromise = manager.connect(csInfo, "claude-opus");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
+    const connectPromise = manager.connect(csInfo, MODELS);
 
     // Yield once so the synchronous registration in connect() runs.
     await new Promise((r) => setTimeout(r, 0));
@@ -371,13 +403,13 @@ describe("CodespaceManager", () => {
     };
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
     const phases: (string | undefined)[] = [];
     manager.on("connectionChanged", (c) => {
       phases.push(c.progress?.phase ?? `[final:${c.connectionState}]`);
     });
 
-    await manager.connect(csInfo, "claude-opus");
+    await manager.connect(csInfo, MODELS);
 
     // Expect at minimum: allocating-port → opening-tunnel → writing-config
     // → verifying-config → starting-health-check → final connected (no progress).
@@ -424,7 +456,7 @@ describe("CodespaceManager", () => {
       .mockResolvedValueOnce("")     // attempt 2: onboarding
       .mockResolvedValueOnce("1\n"); // attempt 2: verify → ok
 
-    const manager = new CodespaceManager(23337, () => "tok");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
     const writeAttempts: number[] = [];
     manager.on("connectionChanged", (c) => {
       if (c.progress?.phase === "writing-config" && c.progress.attempt) {
@@ -432,7 +464,7 @@ describe("CodespaceManager", () => {
       }
     });
 
-    await manager.connect(csInfo, "claude-opus");
+    await manager.connect(csInfo, MODELS);
     expect(writeAttempts).toEqual([1, 2]);
   }, 30_000);
 
@@ -457,13 +489,13 @@ describe("CodespaceManager", () => {
     };
     vi.mocked(executeRemoteCommand).mockResolvedValue("0\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
     const errors: any[] = [];
     manager.on("connectionChanged", (c) => {
       if (c.connectionState === "error") errors.push(c);
     });
 
-    await expect(manager.connect(csInfo, "claude-opus")).rejects.toThrow();
+    await expect(manager.connect(csInfo, MODELS)).rejects.toThrow();
     expect(errors[errors.length - 1].errorCode).toBe("remote-config-failed");
   }, 30_000);
 
@@ -492,8 +524,8 @@ describe("CodespaceManager", () => {
     vi.mocked(listCodespaces).mockResolvedValue([csInfo]);
     vi.mocked(executeRemoteCommand).mockResolvedValue("1\n");
 
-    const manager = new CodespaceManager(23337, () => "tok");
-    await manager.connect(csInfo, "claude-opus");
+    const manager = new CodespaceManager(23337, [CLAUDE_TEST_PLUGIN], () => "tok");
+    await manager.connect(csInfo, MODELS);
 
     // Force the connection's reconnectAttempts to MAX so the next exit
     // triggers the max-reconnect-reached path immediately, without

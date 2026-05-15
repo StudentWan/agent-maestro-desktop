@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import type { AgentLocalConfigSnippet } from "../types";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const SETTINGS_PATH = path.join(CLAUDE_DIR, "settings.json");
@@ -103,4 +104,31 @@ export async function writeModelToClaudeConfig(modelId: string): Promise<void> {
   };
   await writeJsonFile(SETTINGS_PATH, newSettings);
   console.log(`[ClaudeConfig] Model set to: ${modelId}`);
+}
+
+/**
+ * Snippet shown in the renderer's AgentConfigPanel for Claude.
+ *
+ * Claude is configured purely through env vars (no separate config file
+ * we need to expose to the user) — Claude Code reads `ANTHROPIC_BASE_URL`
+ * and `ANTHROPIC_AUTH_TOKEN` from `~/.claude/settings.json`'s `env` block,
+ * which we manage automatically. The snippet helps users who want to wire
+ * up another Anthropic-API-aware tool by hand.
+ */
+export function getClaudeConfigSnippet(
+  port: number,
+  modelId: string | null,
+): AgentLocalConfigSnippet {
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const env: Record<string, string> = {
+    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_AUTH_TOKEN: AUTH_TOKEN_VALUE,
+  };
+  if (modelId) {
+    env[MODEL_ENV_KEY] = modelId;
+  }
+  return {
+    envLabel: "Claude Code env (auto-applied to ~/.claude/settings.json)",
+    envVars: env,
+  };
 }

@@ -1,4 +1,4 @@
-import type { CopilotCompletionResponse } from "../copilot/types";
+import type { CopilotCompletionResponse } from "../../../copilot/types";
 import type { AnthropicResponse, AnthropicResponseBlock } from "./types";
 
 /**

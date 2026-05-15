@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { mapModelName } from "../../converter/model-mapper";
 
 /**
  * GET /v1/models - List available models (Anthropic format)

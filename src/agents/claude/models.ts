@@ -3,10 +3,10 @@ import {
   COPILOT_DEFAULT_API_BASE_URL,
   EDITOR_PLUGIN_VERSION,
   EDITOR_VERSION,
-} from "../shared/constants";
-import type { ModelInfo } from "../shared/types";
-import type { TokenManager } from "./token-manager";
-import type { CopilotToken } from "./types";
+} from "../../shared/constants";
+import type { TokenManager } from "../../copilot/token-manager";
+import type { CopilotToken } from "../../copilot/types";
+import type { AgentModelInfo } from "../types";
 
 const LEGACY_COPILOT_MODELS_URL = "https://api.githubcopilot.com/models";
 
@@ -23,7 +23,7 @@ interface CopilotModelEntry {
 /**
  * Fetch available models from the Copilot API and filter for Claude models
  */
-export async function fetchAvailableModels(tokenManager: TokenManager): Promise<ModelInfo[]> {
+export async function fetchAvailableModels(tokenManager: TokenManager): Promise<AgentModelInfo[]> {
   const tokenBundle = await resolveTokenBundle(tokenManager);
   const modelsUrl = resolveCopilotModelsUrl(tokenBundle.baseUrl);
 

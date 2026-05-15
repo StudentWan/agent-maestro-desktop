@@ -6,12 +6,7 @@ import {
   startCodespace as ghStartCodespace,
   probeReverseTunnel,
 } from "./gh-cli";
-import {
-  buildWriteConfigScript,
-  buildWriteOnboardingScript,
-  buildRemoveConfigScript,
-  buildUpdateModelScript,
-} from "./remote-config";
+import type { AgentId, AgentPlugin } from "../agents/types";
 import { MAX_RECONNECT_ATTEMPTS, MAX_PORT_RETRIES, CODESPACE_HEALTH_CHECK_INTERVAL_MS } from "../shared/constants";
 import type {
   CodespaceInfo,
@@ -21,6 +16,13 @@ import type {
 } from "./types";
 
 const REMOTE_CONFIG_MAX_ATTEMPTS = 4;
+
+/**
+ * Snapshot of "what model is selected for each agent right now". Passed
+ * into connect()/startAndConnect()/handleUnexpectedDisconnect() so the
+ * codespace can be configured for every agent in a single SSH session.
+ */
+export type AgentModelMap = Readonly<Record<AgentId, string>>;
 
 interface ConnectionEntry {
   readonly connection: CodespaceConnection;
@@ -45,10 +47,16 @@ export class CodespaceManager extends EventEmitter {
   private allocatedPorts = new Set<number>();
   private basePort: number;
   private getToken: () => string | undefined;
+  private readonly plugins: readonly AgentPlugin[];
 
-  constructor(basePort: number, getToken: () => string | undefined = () => undefined) {
+  constructor(
+    basePort: number,
+    plugins: readonly AgentPlugin[],
+    getToken: () => string | undefined = () => undefined,
+  ) {
     super();
     this.basePort = basePort;
+    this.plugins = plugins;
     this.getToken = getToken;
   }
 
@@ -62,45 +70,94 @@ export class CodespaceManager extends EventEmitter {
   }
 
   /**
-   * Write the remote `~/.claude/settings.json` + onboarding marker, then
-   * verify the file landed by reading it back. Retries with exponential
-   * backoff because freshly-resumed codespaces often refuse SSH for the
-   * first few seconds.
+   * Write each agent plugin's remote config (atomic + verified) on the
+   * codespace.
    *
-   * Returns true on success, false after exhausting retries.
+   * Per-plugin failure semantics:
+   *   - Plugins with `criticalForTunnel: true` (Claude today) → returning
+   *     false from this method tears down the tunnel. Preserves today's
+   *     "if Claude config didn't land, the proxy is useless, don't lie
+   *     about being connected" behaviour.
+   *   - Plugins with `criticalForTunnel: false` (Codex, future) → failure
+   *     is logged and we move on. Codex is additive; a TOML-write hiccup
+   *     must NOT break Claude UX.
+   *
+   * Returns true iff every critical plugin's config landed.
    */
   private async writeRemoteConfigWithRetry(
     name: string,
     remotePort: number,
+    models: AgentModelMap,
+    onProgress?: (
+      attempt: number,
+      phase: "writing-config" | "verifying-config",
+      pluginId: AgentId,
+    ) => void,
+  ): Promise<boolean> {
+    let allCriticalLanded = true;
+    for (const plugin of this.plugins) {
+      const model = models[plugin.id] ?? "";
+      const landed = await this.writePluginRemoteConfigWithRetry(
+        name,
+        remotePort,
+        model,
+        plugin,
+        onProgress,
+      );
+      if (!landed && plugin.remoteConfig.criticalForTunnel) {
+        allCriticalLanded = false;
+      } else if (!landed) {
+        console.warn(
+          `[CodespaceManager] Non-critical agent "${plugin.id}" remote config did not land for ${name} — leaving tunnel up`,
+        );
+      }
+    }
+    return allCriticalLanded;
+  }
+
+  private async writePluginRemoteConfigWithRetry(
+    name: string,
+    remotePort: number,
     model: string,
-    onProgress?: (attempt: number, phase: "writing-config" | "verifying-config") => void,
+    plugin: AgentPlugin,
+    onProgress?: (
+      attempt: number,
+      phase: "writing-config" | "verifying-config",
+      pluginId: AgentId,
+    ) => void,
   ): Promise<boolean> {
     const attempts = [0, 2_000, 5_000, 10_000]; // 4 attempts: now, +2s, +5s, +10s
+    const verifyCommand = plugin.remoteConfig.buildVerifyMarkerCommand();
     for (let i = 0; i < attempts.length; i++) {
       if (attempts[i] > 0) {
         await new Promise((r) => setTimeout(r, attempts[i]));
       }
       try {
-        onProgress?.(i + 1, "writing-config");
-        await this.exec(name, buildWriteConfigScript(remotePort, model));
-        await this.exec(name, buildWriteOnboardingScript());
+        onProgress?.(i + 1, "writing-config", plugin.id);
+        await this.exec(name, plugin.remoteConfig.buildWriteScript(remotePort, model));
+        const post = plugin.remoteConfig.buildPostWriteScript?.();
+        if (post) {
+          await this.exec(name, post);
+        }
 
-        // Verify the marker actually landed. Cheap: cat the file and grep
-        // for the AGENT_MAESTRO_MANAGED key.
-        onProgress?.(i + 1, "verifying-config");
-        const verify = await this.exec(
-          name,
-          "cat ~/.claude/settings.json 2>/dev/null | grep -c AGENT_MAESTRO_MANAGED || true",
-        );
+        onProgress?.(i + 1, "verifying-config", plugin.id);
+        const verify = await this.exec(name, verifyCommand);
         if (parseInt(verify.trim(), 10) > 0) {
           if (i > 0) {
-            console.log(`[CodespaceManager] Remote config landed for ${name} on attempt ${i + 1}`);
+            console.log(
+              `[CodespaceManager] Remote config for ${plugin.id} landed on ${name} (attempt ${i + 1})`,
+            );
           }
           return true;
         }
-        console.warn(`[CodespaceManager] Remote config verify failed for ${name} (attempt ${i + 1})`);
+        console.warn(
+          `[CodespaceManager] Remote config verify failed for ${plugin.id} on ${name} (attempt ${i + 1})`,
+        );
       } catch (err) {
-        console.warn(`[CodespaceManager] Remote config attempt ${i + 1} failed for ${name}:`, err);
+        console.warn(
+          `[CodespaceManager] Remote config attempt ${i + 1} failed for ${plugin.id} on ${name}:`,
+          err,
+        );
       }
     }
     return false;
@@ -151,19 +208,19 @@ export class CodespaceManager extends EventEmitter {
   /** Start a shutdown Codespace, then connect to it. */
   async startAndConnect(
     info: CodespaceInfo,
-    model: string,
+    models: AgentModelMap,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
     await ghStartCodespace(info.name, this.getToken());
     // Wait a moment for the Codespace to become Available
     await new Promise((r) => setTimeout(r, 5000));
     const updatedInfo: CodespaceInfo = { ...info, state: "Available" };
-    return this.connect(updatedInfo, model, source);
+    return this.connect(updatedInfo, models, source);
   }
 
   async connect(
     info: CodespaceInfo,
-    model: string,
+    models: AgentModelMap,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
     const existing = this.connections.get(info.name);
@@ -311,7 +368,7 @@ export class CodespaceManager extends EventEmitter {
     const configWritten = await this.writeRemoteConfigWithRetry(
       info.name,
       remotePort,
-      model,
+      models,
       (attempt, phase) => {
         connection = updateConnection(connection, {
           progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
@@ -339,7 +396,7 @@ export class CodespaceManager extends EventEmitter {
 
     // Setup reconnect handler
     tunnel.on("unexpectedExit", () => {
-      this.handleUnexpectedDisconnect(info.name, model);
+      this.handleUnexpectedDisconnect(info.name, models);
     });
 
     // Start health check (app-level: curl /health through tunnel)
@@ -397,10 +454,17 @@ export class CodespaceManager extends EventEmitter {
       });
       this.connections.set(name, { ...entry, connection });
       this.publish(connection);
-      try {
-        await this.exec(name, buildRemoveConfigScript());
-      } catch {
-        console.warn(`[CodespaceManager] Remote config cleanup failed for ${name}`);
+      // Run every plugin's remove script. Failures are best-effort and
+      // logged per plugin so a Codex cleanup hiccup doesn't mask Claude
+      // cleanup success (or vice versa).
+      for (const plugin of this.plugins) {
+        try {
+          await this.exec(name, plugin.remoteConfig.buildRemoveScript());
+        } catch {
+          console.warn(
+            `[CodespaceManager] Remote config cleanup failed for ${plugin.id} on ${name}`,
+          );
+        }
       }
     } else {
       console.log(`[CodespaceManager] Skipping remote cleanup for ${name} — not Available`);
@@ -457,15 +521,26 @@ export class CodespaceManager extends EventEmitter {
     this.allocatedPorts.clear();
   }
 
-  async updateModel(model: string): Promise<void> {
+  /**
+   * Push the new model for the given agent into all currently connected
+   * codespaces. Per-agent: callers pass the plugin id and the new model
+   * id; the manager picks the matching plugin's `buildUpdateModelScript`
+   * and runs it. Other agents on each codespace are not touched.
+   */
+  async updateModel(agentId: AgentId, model: string): Promise<void> {
+    const plugin = this.plugins.find((p) => p.id === agentId);
+    if (!plugin) {
+      console.warn(`[CodespaceManager] updateModel: no plugin registered for "${agentId}"`);
+      return;
+    }
     const promises = Array.from(this.connections.entries()).map(async ([name, entry]) => {
       // Skip anything not actively connected — running `gh codespace ssh`
       // against a stopped/erroring codespace can resurrect it.
       if (entry.connection.connectionState !== "connected") return;
       try {
-        await this.exec(name, buildUpdateModelScript(model));
+        await this.exec(name, plugin.remoteConfig.buildUpdateModelScript(model));
       } catch {
-        console.warn(`[CodespaceManager] Model update failed for ${name}`);
+        console.warn(`[CodespaceManager] Model update failed for ${agentId} on ${name}`);
       }
     });
     await Promise.allSettled(promises);
@@ -521,7 +596,7 @@ export class CodespaceManager extends EventEmitter {
     this.connections.set(name, { ...entry, connection: updated });
   }
 
-  private async handleUnexpectedDisconnect(name: string, model: string): Promise<void> {
+  private async handleUnexpectedDisconnect(name: string, models: AgentModelMap): Promise<void> {
     const entry = this.connections.get(name);
     if (!entry) {
       console.log(
@@ -673,7 +748,7 @@ export class CodespaceManager extends EventEmitter {
       // Use the same retry-and-verify path as the initial connect — a
       // reconnect after the codespace was briefly unreachable is exactly
       // when SSH is least cooperative.
-      await this.writeRemoteConfigWithRetry(name, newPort, model, (attempt, phase) => {
+      await this.writeRemoteConfigWithRetry(name, newPort, models, (attempt, phase) => {
         updated = updateConnection(updated, {
           progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS },
         });
@@ -682,7 +757,7 @@ export class CodespaceManager extends EventEmitter {
       });
 
       tunnel.on("unexpectedExit", () => {
-        this.handleUnexpectedDisconnect(name, model);
+        this.handleUnexpectedDisconnect(name, models);
       });
 
       updated = updateConnection(updated, {

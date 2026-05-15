@@ -3,7 +3,7 @@ import type {
   AnthropicMessage,
   AnthropicRequest,
   AnthropicToolDef,
-} from "../converter/types";
+} from "./converter/types";
 
 const MAX_CACHE_CONTROL_MARKERS = 4;
 const EPHEMERAL_CACHE_CONTROL = { type: "ephemeral" } as const;

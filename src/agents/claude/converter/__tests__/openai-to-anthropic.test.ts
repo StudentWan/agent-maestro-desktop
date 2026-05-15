@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { convertOpenAIToAnthropic } from '../openai-to-anthropic'
-import type { CopilotCompletionResponse } from '../../copilot/types'
+import type { CopilotCompletionResponse } from '../../../../copilot/types'
 
 function makeResponse(overrides: Partial<CopilotCompletionResponse> = {}): CopilotCompletionResponse {
   return {

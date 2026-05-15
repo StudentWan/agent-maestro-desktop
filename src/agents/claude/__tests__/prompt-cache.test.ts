@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { applyCopilotPromptCache, countCacheControlMarkers } from '../prompt-cache'
-import type { AnthropicRequest } from '../../converter/types'
+import type { AnthropicRequest } from '../converter/types'
 
 describe('applyCopilotPromptCache', () => {
   it('adds bounded cache markers to tools, system, and trailing user content', () => {

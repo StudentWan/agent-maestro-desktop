@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Hono } from 'hono'
-import { registerCountTokensRoute } from '../routes/anthropic-count-tokens'
+import { registerCountTokensRoute } from '../routes/count-tokens'
 
 describe('count tokens route', () => {
   it('returns estimated token count for valid JSON body', async () => {

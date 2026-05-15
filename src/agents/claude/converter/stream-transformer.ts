@@ -1,4 +1,4 @@
-import type { CopilotStreamChoice } from "../copilot/types";
+import type { CopilotStreamChoice } from "../../../copilot/types";
 
 /**
  * Transform a Copilot SSE stream (OpenAI format) into Anthropic SSE events.

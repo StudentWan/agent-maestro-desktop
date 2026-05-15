@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fetchAvailableModels } from '../models'
-import type { TokenManager } from '../token-manager'
+import type { TokenManager } from '../../../copilot/token-manager'
 
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)

@@ -6,10 +6,15 @@
  * in all Codespace images.
  *
  * All writes are ATOMIC: we serialize to a sibling tmp file, fsync it, then
- * os.replace() onto the target. This guarantees a concurrent reader (e.g.
- * the `claude` CLI starting up at the same instant) will see either the
- * complete old file or the complete new file — never a half-written one.
+ * os.replace() onto the target. The atomicity helper is shared with all
+ * other agent plugins via `src/codespace/atomic-dump.ts` — we only inline
+ * Claude-specific content (paths, env keys, marker name) here.
  */
+import { ATOMIC_DUMP_HELPER } from "../../codespace/atomic-dump";
+
+/** Shell command verifying the Claude marker is present in remote settings. */
+export const CLAUDE_VERIFY_MARKER_COMMAND =
+  "cat ~/.claude/settings.json 2>/dev/null | grep -c AGENT_MAESTRO_MANAGED || true";
 
 /**
  * Escape a string for safe embedding in a Python string literal.
@@ -18,36 +23,6 @@
 function escapePythonString(value: string): string {
   return value.replace(/[\\']/g, "");
 }
-
-/**
- * Shared Python helper that performs an atomic JSON dump to `path`. Defined
- * once and inlined into each script so we don't need to ship a Python module
- * to the codespace.
- *
- * The tmp file lives in the same directory as the target so os.replace() is
- * a same-filesystem rename (POSIX-atomic). fsync before rename guards against
- * a power-loss / kill-9 leaving a zero-byte file behind.
- */
-const ATOMIC_DUMP_HELPER = `
-def _atomic_dump(cfg, path):
-    import json, os, tempfile
-    d = os.path.dirname(path) or '.'
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix='.maestro-', suffix='.tmp', dir=d)
-    try:
-        with os.fdopen(fd, 'w') as f:
-            json.dump(cfg, f, indent=2)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp, path)
-    except Exception:
-        try: os.remove(tmp)
-        except OSError: pass
-        raise
-`;
 
 /**
  * Generates a Python3 script that writes ~/.claude/settings.json with

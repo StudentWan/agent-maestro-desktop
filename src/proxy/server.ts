@@ -3,13 +3,20 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 import type { CopilotClient } from "../copilot/client";
+import type { AgentPlugin } from "../agents/types";
 import type { RequestLogEntry } from "../shared/types";
 import { createRequestLogger } from "./middleware/request-logger";
 import { registerHealthRoutes } from "./routes/health";
-import { registerModelsRoutes } from "./routes/models";
-import { registerMessagesRoute } from "./routes/anthropic-messages";
-import { registerCountTokensRoute } from "./routes/anthropic-count-tokens";
 
+/**
+ * Plugin-driven proxy server.
+ *
+ * The Hono app + request logger + /health route are agent-agnostic.
+ * Everything else — Anthropic Messages, Codex Responses, model lists, ... —
+ * comes from the per-agent plugins passed in at construction time. The
+ * server itself never imports anything from `src/agents/<name>/...`,
+ * which is what mechanically keeps the per-agent boundary honest.
+ */
 export class ProxyServer {
   private app: Hono;
   private server: ServerType | null = null;
@@ -17,9 +24,11 @@ export class ProxyServer {
   private copilotClient: CopilotClient | null = null;
   private onLogCallback?: (entry: RequestLogEntry) => void;
   private requestCount = 0;
+  private readonly plugins: readonly AgentPlugin[];
 
-  constructor(port: number) {
+  constructor(port: number, plugins: readonly AgentPlugin[]) {
     this.port = port;
+    this.plugins = plugins;
     this.app = new Hono();
     this.setupMiddleware();
     this.setupRoutes();
@@ -54,7 +63,10 @@ export class ProxyServer {
       hostname: "127.0.0.1",
     });
 
-    console.log(`[ProxyServer] Started on http://127.0.0.1:${this.port}`);
+    console.log(
+      `[ProxyServer] Started on http://127.0.0.1:${this.port} ` +
+        `(agents: ${this.plugins.map((p) => p.id).join(", ")})`,
+    );
   }
 
   /**
@@ -100,16 +112,12 @@ export class ProxyServer {
   }
 
   private setupRoutes(): void {
-    // Health check
+    // Cross-agent
     registerHealthRoutes(this.app);
 
-    // Models list
-    registerModelsRoutes(this.app);
-
-    // Anthropic Messages API
-    registerMessagesRoute(this.app, () => this.copilotClient);
-
-    // Token counting
-    registerCountTokensRoute(this.app);
+    // Per-agent: each plugin owns its routes (model list, request handling).
+    for (const plugin of this.plugins) {
+      plugin.registerRoutes(this.app, () => this.copilotClient);
+    }
   }
 }

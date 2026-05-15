@@ -1,4 +1,4 @@
-import type { CopilotTool } from "../copilot/types";
+import type { CopilotTool } from "../../../copilot/types";
 
 interface AnthropicTool {
   name: string;

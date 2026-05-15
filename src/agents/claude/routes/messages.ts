@@ -1,19 +1,34 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
-import type { CopilotClient } from "../../copilot/client";
-import { convertAnthropicToOpenAI } from "../../converter/anthropic-to-openai";
-import { convertOpenAIToAnthropic } from "../../converter/openai-to-anthropic";
-import { createStreamTransformer } from "../../converter/stream-transformer";
-import type { AnthropicRequest } from "../../converter/types";
+import type { CopilotClient } from "../../../copilot/client";
+import type { CopilotAnthropicClient } from "../anthropic-client";
+import { convertAnthropicToOpenAI } from "../converter/anthropic-to-openai";
+import { convertOpenAIToAnthropic } from "../converter/openai-to-anthropic";
+import { createStreamTransformer } from "../converter/stream-transformer";
+import type { AnthropicRequest } from "../converter/types";
+
+/**
+ * Subset of services this route needs. Bundled into one object so the
+ * plugin can inject both clients (Anthropic Messages for Claude models,
+ * generic ChatCompletions for the OpenAI-compatible fallback path) with a
+ * single getter.
+ */
+export interface ClaudeMessagesServices {
+  chat: Pick<CopilotClient, "chatCompletion" | "chatCompletionStream">;
+  anthropic: Pick<CopilotAnthropicClient, "messages" | "messagesStream">;
+}
 
 /**
  * Register the POST /v1/messages route (Anthropic Messages API)
  */
-export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient | null) {
+export function registerMessagesRoute(
+  app: Hono,
+  getServices: () => ClaudeMessagesServices | null,
+) {
   app.post("/v1/messages", async (c: Context) => {
-    const client = getClient();
-    if (!client) {
+    const services = getServices();
+    if (!services) {
       return c.json(
         {
           error: {
@@ -58,7 +73,7 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
 
       if (isClaudeModel(originalModel)) {
         if (isStream) {
-          const copilotResponse = await client.anthropicMessagesStream(requestBody, {
+          const copilotResponse = await services.anthropic.messagesStream(requestBody, {
             anthropicBeta: headers["anthropic-beta"],
           });
 
@@ -98,7 +113,7 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
           });
         }
 
-        const anthropicResponse = await client.anthropicMessages(requestBody, {
+        const anthropicResponse = await services.anthropic.messages(requestBody, {
           anthropicBeta: headers["anthropic-beta"],
         });
         c.set("loggedInputTokens", anthropicResponse.usage.input_tokens);
@@ -111,7 +126,7 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
 
       if (isStream) {
         // --- Streaming ---
-        const copilotResponse = await client.chatCompletionStream(openaiRequest);
+        const copilotResponse = await services.chat.chatCompletionStream(openaiRequest);
 
         if (!copilotResponse.body) {
           return c.json(
@@ -145,7 +160,7 @@ export function registerMessagesRoute(app: Hono, getClient: () => CopilotClient 
         });
       } else {
         // --- Non-streaming ---
-        const copilotResponse = await client.chatCompletion(openaiRequest);
+        const copilotResponse = await services.chat.chatCompletion(openaiRequest);
 
         // Convert OpenAI response → Anthropic response
         const anthropicResponse = convertOpenAIToAnthropic(copilotResponse, originalModel);

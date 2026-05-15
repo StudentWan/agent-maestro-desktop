@@ -1,4 +1,4 @@
-import type { CopilotCompletionRequest, CopilotMessage } from "../copilot/types";
+import type { CopilotCompletionRequest, CopilotMessage } from "../../../copilot/types";
 import { mapModelName } from "./model-mapper";
 import { convertToolsToOpenAI, convertToolChoiceToOpenAI } from "./tool-converter";
 import type { AnthropicRequest, AnthropicMessage, AnthropicContentBlock } from "./types";
