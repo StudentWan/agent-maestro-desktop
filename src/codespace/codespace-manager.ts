@@ -223,6 +223,14 @@ export class CodespaceManager extends EventEmitter {
     models: AgentModelMap,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
+    const hasToken = !!this.getToken();
+    console.log(
+      `[${new Date().toISOString()}] [CodespaceManager] connect() called — ` +
+        `codespace=${info.name} state=${info.state} source=${source} ` +
+        `hasToken=${hasToken} basePort=${this.basePort} ` +
+        `plugins=[${this.plugins.map((p) => p.id).join(",")}]`,
+    );
+
     const existing = this.connections.get(info.name);
     if (existing) {
       // Allow Reconnect after a terminal error: evict the stale entry so
@@ -293,12 +301,25 @@ export class CodespaceManager extends EventEmitter {
       );
 
       let portConflict = false;
-      tunnel.on("portConflict", () => {
+      tunnel.on("portConflict", (port: number) => {
+        console.warn(
+          `[${new Date().toISOString()}] [CodespaceManager] portConflict on :${port} for ${info.name}`,
+        );
         portConflict = true;
       });
 
       try {
+        console.log(
+          `[${new Date().toISOString()}] [CodespaceManager] awaiting tunnel.connect() — ` +
+            `local :${localPort} → remote :${remotePort} (attempt ${portRetries + 1}/${MAX_PORT_RETRIES})`,
+        );
         await tunnel.connect();
+        const tunnelState = tunnel.getState();
+        const tunnelPid = tunnel.getPid?.() ?? "(no pid)";
+        console.log(
+          `[${new Date().toISOString()}] [CodespaceManager] tunnel.connect() resolved — ` +
+            `isConnected=${tunnel.isConnected()} state=${tunnelState} pid=${tunnelPid} portConflict=${portConflict}`,
+        );
         if (!portConflict && tunnel.isConnected()) break;
         if (!portConflict) {
           // Probe-not-ready / SSH-handshake-not-confirmed path: the process

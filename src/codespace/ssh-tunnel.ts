@@ -42,11 +42,23 @@ export class SshTunnel extends EventEmitter {
     this.intentionalDisconnect = false;
     this.setState("connecting");
 
+    const tokenForSpawn = this.getToken?.();
+    console.log(
+      `[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] ` +
+        `spawning tunnel — remote :${this.remotePort} → local :${this.localPort} ` +
+        `hasToken=${!!tokenForSpawn} hasProbe=${!!this.probeReady}`,
+    );
+
     this.process = spawnSshTunnel(
       this.codespaceName,
       this.remotePort,
       this.localPort,
-      this.getToken?.(),
+      tokenForSpawn,
+    );
+
+    console.log(
+      `[${new Date().toISOString()}] [SSHTunnel:${this.codespaceName}] ` +
+        `process spawned pid=${this.process.pid}`,
     );
 
     this.process.stderr?.on("data", (data: Buffer) => {
