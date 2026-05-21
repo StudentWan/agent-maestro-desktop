@@ -10,7 +10,6 @@ import {
 } from "../copilot/auth";
 import { TokenManager } from "../copilot/token-manager";
 import { CopilotClient } from "../copilot/client";
-import { fetchAvailableModels } from "../copilot/models";
 import { ProxyServer } from "../proxy/server";
 import {
   getGithubToken,
@@ -22,14 +21,40 @@ import {
   setAutoStart,
   getSelectedModel,
   setSelectedModel,
+  getAllSelectedModels,
 } from "../store/app-store";
-import { applyClaudeConfig, removeClaudeConfig, writeModelToClaudeConfig } from "./claude-config";
-import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry, ModelInfo } from "../shared/types";
-import { CodespaceManager } from "../codespace/codespace-manager";
+import type {
+  AuthStatus,
+  ProxyStatus,
+  AppConfig,
+  RequestLogEntry,
+} from "../shared/types";
+import { CodespaceManager, type AgentModelMap } from "../codespace/codespace-manager";
 import { checkGhCli } from "../codespace/gh-cli";
 import { VsCodeCodespaceDetector } from "../codespace/vscode-detector";
 import { AutoBridgeOrchestrator } from "../codespace/auto-bridge";
 import type { CodespaceConnection, CodespaceInfo, GhCliStatus } from "../codespace/types";
+import { claudePlugin } from "../agents/claude";
+import { codexPlugin } from "../agents/codex";
+import {
+  type AgentAppConfig,
+  type AgentDescriptor,
+  type AgentId,
+  type AgentPlugin,
+  describeAgent,
+} from "../agents/types";
+
+/**
+ * Order matters: plugins are iterated for registerRoutes / localConfig.apply
+ * / remoteConfig.* in this exact sequence. Claude is first because it's the
+ * legacy critical path (its `criticalForTunnel: true` semantics rely on
+ * being processed before any additive plugin).
+ */
+const AGENTS: readonly AgentPlugin[] = [claudePlugin, codexPlugin];
+
+function getPlugin(agentId: string): AgentPlugin | undefined {
+  return AGENTS.find((p) => p.id === agentId);
+}
 
 let tokenManager: TokenManager | null = null;
 let copilotClient: CopilotClient | null = null;
@@ -73,10 +98,24 @@ function getProxyStatus(): ProxyStatus {
   };
 }
 
+/** Build the snapshot of `{ claude: "...", codex: "..." }` model ids. */
+function getAgentModelMap(): AgentModelMap {
+  const stored = getAllSelectedModels();
+  const map: Record<string, string> = {};
+  for (const plugin of AGENTS) {
+    map[plugin.id] = stored[plugin.id] ?? "";
+  }
+  return map as AgentModelMap;
+}
+
 function getOrCreateCodespaceManager(): CodespaceManager {
   if (!codespaceManager) {
     const port = proxyServer?.getPort() ?? getProxyPort();
-    codespaceManager = new CodespaceManager(port, () => getCodespaceToken() ?? undefined);
+    codespaceManager = new CodespaceManager(
+      port,
+      AGENTS,
+      () => getCodespaceToken() ?? undefined,
+    );
 
     codespaceManager.on("connectionChanged", (connection: CodespaceConnection) => {
       sendToRenderer("codespace:status-changed", connection);
@@ -112,7 +151,7 @@ function ensureAutoBridgeRunning(): void {
     getExcludePids: () => manager.getOwnPids(),
   });
   autoBridge = new AutoBridgeOrchestrator(vscodeDetector, manager, {
-    getModel: () => getSelectedModel() ?? "",
+    getAgentModels: () => getAgentModelMap(),
   });
   vscodeDetector.start();
   autoBridge.start();
@@ -139,6 +178,71 @@ async function refreshMissingScopes(): Promise<void> {
 }
 
 /**
+ * Apply every agent's local config in parallel. Failures from one plugin
+ * are logged but never block another plugin's apply — Codex going wrong
+ * mustn't deny Claude its env vars.
+ */
+async function applyAllLocalConfigs(port: number): Promise<void> {
+  const results = await Promise.allSettled(
+    AGENTS.map((p) => p.localConfig.apply(port)),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(
+        `[IPC] Failed to apply local config for ${AGENTS[i].id}:`,
+        r.reason,
+      );
+    }
+  });
+}
+
+/** Same as `applyAllLocalConfigs` but for the remove path. */
+async function removeAllLocalConfigs(port: number): Promise<void> {
+  const results = await Promise.allSettled(
+    AGENTS.map((p) => p.localConfig.remove(port)),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(
+        `[IPC] Failed to remove local config for ${AGENTS[i].id}:`,
+        r.reason,
+      );
+    }
+  });
+}
+
+/**
+ * Proactively auto-select the first available model for every agent that
+ * doesn't have one yet. Called at login/restore time so codespace config
+ * writes always have a concrete model to write — without this, Codex's
+ * model would stay empty until the user opened the Codex panel in the UI.
+ */
+async function autoSelectModelsForAllAgents(): Promise<void> {
+  if (!tokenManager) return;
+  const results = await Promise.allSettled(
+    AGENTS.map(async (plugin) => {
+      const current = getSelectedModel(plugin.id);
+      if (current && current !== "") return; // already selected
+      try {
+        const models = await plugin.fetchModels(tokenManager!);
+        if (models.length === 0) return;
+        const firstModel = models[0].id;
+        setSelectedModel(plugin.id, firstModel);
+        await plugin.localConfig.writeModel(firstModel).catch(() => {});
+        console.log(`[IPC] Auto-selected first model for ${plugin.id}: ${firstModel}`);
+      } catch (err) {
+        console.warn(`[IPC] Failed to auto-select model for ${plugin.id}:`, err);
+      }
+    }),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.warn(`[IPC] autoSelectModelsForAllAgents: ${AGENTS[i].id} rejected:`, r.reason);
+    }
+  });
+}
+
+/**
  * Start the proxy server (always, regardless of auth state).
  * The proxy returns 401 for messages requests when not authenticated.
  */
@@ -146,9 +250,12 @@ async function ensureProxyRunning(): Promise<void> {
   if (proxyServer?.isRunning()) return;
 
   const port = getProxyPort();
-  proxyServer = new ProxyServer(port);
+  proxyServer = new ProxyServer(port, AGENTS);
   proxyServer.setCopilotClient(copilotClient);
   proxyServer.setLogCallback((entry: RequestLogEntry) => {
+    console.log(
+      `[Proxy] ${entry.method} ${entry.path} → ${entry.status} (${entry.durationMs}ms) model=${entry.model}`,
+    );
     sendToRenderer("proxy:request-log", entry);
   });
 
@@ -188,6 +295,10 @@ async function initializeFromStoredToken(): Promise<boolean> {
 
     // Check codespace-token scopes (independent of the Copilot token).
     await refreshMissingScopes();
+
+    // Ensure every agent has a model selected (especially Codex, which
+    // won't get its UI-driven auto-select until the panel is opened).
+    await autoSelectModelsForAllAgents();
 
     return true;
   } catch (error) {
@@ -244,14 +355,18 @@ async function runCopilotDeviceFlowAndInstallToken(): Promise<AuthStatus> {
   // missingScopes will be [] and the banner stays hidden.
   await refreshMissingScopes();
 
+  // Ensure every agent has a model before anything else touches them
+  // (codespace auto-bridge, local config apply, etc.).
+  await autoSelectModelsForAllAgents();
+
   const status = getAuthStatus();
   sendToRenderer("auth:status-changed", status);
   sendToRenderer("proxy:status-changed", getProxyStatus());
 
-  // Auto-configure Claude Code to use our proxy
+  // Auto-configure every agent locally (Claude env vars, Codex TOML, ...)
   const port = proxyServer?.getPort() ?? getProxyPort();
-  applyClaudeConfig(port).catch((err) => {
-    console.error("[IPC] Failed to apply Claude config:", err);
+  applyAllLocalConfigs(port).catch((err) => {
+    console.error("[IPC] applyAllLocalConfigs error (post-login):", err);
   });
 
   // Start the VS Code Codespace auto-bridge (it'll be a no-op if codespace
@@ -321,10 +436,9 @@ export function registerIpcHandlers(): void {
       sendToRenderer("auth:status-changed", getAuthStatus());
       sendToRenderer("proxy:status-changed", getProxyStatus());
 
-      // Auto-configure Claude Code to use our proxy
       const port = proxyServer?.getPort() ?? getProxyPort();
-      applyClaudeConfig(port).catch((err) => {
-        console.error("[IPC] Failed to apply Claude config:", err);
+      applyAllLocalConfigs(port).catch((err) => {
+        console.error("[IPC] applyAllLocalConfigs error (restore):", err);
       });
 
       // Start the VS Code Codespace auto-bridge
@@ -381,10 +495,10 @@ export function registerIpcHandlers(): void {
     // user gets a clean re-authorize prompt.
     setCodespaceToken(null);
 
-    // Remove Claude Code proxy configuration
+    // Remove every agent's local config (env vars, TOML blocks, ...).
     const port = proxyServer?.getPort() ?? getProxyPort();
-    removeClaudeConfig(port).catch((err) => {
-      console.error("[IPC] Failed to remove Claude config:", err);
+    removeAllLocalConfigs(port).catch((err) => {
+      console.error("[IPC] removeAllLocalConfigs error (logout):", err);
     });
 
     const status = getAuthStatus();
@@ -429,68 +543,112 @@ export function registerIpcHandlers(): void {
     };
   });
 
-  // --- Config handlers ---
+  // --- Top-level config handler (agent-agnostic) ---
 
   ipcMain.handle("config:get" satisfies IpcChannels, () => {
     const port = proxyServer?.getPort() ?? getProxyPort();
-    const config: AppConfig = {
-      proxyPort: port,
-      anthropicBaseUrl: `http://127.0.0.1:${port}`,
-      anthropicAuthToken: "Powered by Agent Maestro Desktop",
-      envVars: {
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        ANTHROPIC_AUTH_TOKEN: "Powered by Agent Maestro Desktop",
-      },
-    };
+    const config: AppConfig = { proxyPort: port };
     return config;
   });
 
-  // --- Model handlers ---
+  // --- Per-agent handlers (parametric) ---
 
-  ipcMain.handle("models:get-available" satisfies IpcChannels, async () => {
-    if (!tokenManager) {
-      return [];
-    }
-    try {
-      const models = await fetchAvailableModels(tokenManager);
+  ipcMain.handle("agents:list" satisfies IpcChannels, (): AgentDescriptor[] => {
+    return AGENTS.map((p) => describeAgent(p));
+  });
 
-      // Auto-select first model if none is currently selected
-      const currentModel = getSelectedModel();
-      if ((!currentModel || currentModel === "") && models.length > 0) {
-        const firstModel = models[0].id;
-        setSelectedModel(firstModel);
-        await writeModelToClaudeConfig(firstModel);
-        console.log(`[IPC] Auto-selected first model: ${firstModel}`);
+  ipcMain.handle(
+    "agents:get-available-models" satisfies IpcChannels,
+    async (_event, agentId: string) => {
+      if (!tokenManager) return [];
+      const plugin = getPlugin(agentId);
+      if (!plugin) return [];
+      try {
+        const models = await plugin.fetchModels(tokenManager);
+
+        // Auto-select first model if none is currently selected for THIS
+        // agent. Mirrors the legacy single-agent behaviour, scoped per
+        // plugin so each agent gets its own first-model bootstrap.
+        const currentModel = getSelectedModel(agentId);
+        if ((!currentModel || currentModel === "") && models.length > 0) {
+          const firstModel = models[0].id;
+          setSelectedModel(agentId, firstModel);
+          await plugin.localConfig.writeModel(firstModel).catch((err) => {
+            console.error(
+              `[IPC] Failed to write auto-selected model for ${agentId}:`,
+              err,
+            );
+          });
+          console.log(`[IPC] Auto-selected first model for ${agentId}: ${firstModel}`);
+        }
+
+        return models;
+      } catch (error) {
+        console.error(`[IPC] Failed to fetch models for ${agentId}:`, error);
+        return [];
       }
+    },
+  );
 
-      return models;
-    } catch (error) {
-      console.error("[IPC] Failed to fetch models:", error);
-      return [];
-    }
-  });
+  ipcMain.handle(
+    "agents:get-selected-model" satisfies IpcChannels,
+    (_event, agentId: string) => {
+      return getSelectedModel(agentId);
+    },
+  );
 
-  ipcMain.handle("models:get-selected" satisfies IpcChannels, () => {
-    return getSelectedModel();
-  });
+  ipcMain.handle(
+    "agents:set-selected-model" satisfies IpcChannels,
+    async (_event, agentId: string, modelId: string) => {
+      const plugin = getPlugin(agentId);
+      if (!plugin) {
+        console.warn(`[IPC] set-selected-model: unknown agent "${agentId}"`);
+        return modelId;
+      }
+      setSelectedModel(agentId, modelId);
+      try {
+        await plugin.localConfig.writeModel(modelId);
+        console.log(`[IPC] Model for ${agentId} set to: ${modelId}`);
+      } catch (error) {
+        console.error(
+          `[IPC] Failed to write model to local config for ${agentId}:`,
+          error,
+        );
+      }
+      // Push to currently-connected codespaces (per-agent).
+      if (codespaceManager) {
+        codespaceManager
+          .updateModel(agentId as AgentId, modelId)
+          .catch((err) => {
+            console.error(
+              `[IPC] Failed to update model in Codespaces for ${agentId}:`,
+              err,
+            );
+          });
+      }
+      return modelId;
+    },
+  );
 
-  ipcMain.handle("models:set-selected" satisfies IpcChannels, async (_event, modelId: string) => {
-    setSelectedModel(modelId);
-    // Write model to local Claude config
-    try {
-      await writeModelToClaudeConfig(modelId);
-      console.log(`[IPC] Model set to: ${modelId}`);
-    } catch (error) {
-      console.error("[IPC] Failed to write model to Claude config:", error);
-    }
-    // Propagate to connected Codespaces
-    if (codespaceManager) {
-      codespaceManager.updateModel(modelId).catch((err) => {
-        console.error("[IPC] Failed to update model in Codespaces:", err);
-      });
-    }
-    return modelId;
-  });
+  ipcMain.handle(
+    "agents:get-config" satisfies IpcChannels,
+    (_event, agentId: string): AgentAppConfig | null => {
+      const plugin = getPlugin(agentId);
+      if (!plugin) return null;
+      const port = proxyServer?.getPort() ?? getProxyPort();
+      const modelId = getSelectedModel(agentId);
+      const baseUrl =
+        plugin.routePrefix.length > 0
+          ? `http://127.0.0.1:${port}${plugin.routePrefix}/v1`
+          : `http://127.0.0.1:${port}`;
+      return {
+        agentId: plugin.id,
+        proxyPort: port,
+        baseUrl,
+        snippet: plugin.localConfig.getSnippet(port, modelId),
+      };
+    },
+  );
 
   // --- Settings handlers ---
 
@@ -538,14 +696,14 @@ export function registerIpcHandlers(): void {
     if (!info) {
       throw new Error(`Codespace "${name}" not found`);
     }
-    const model = getSelectedModel() ?? "";
+    const models = getAgentModelMap();
 
     // If Codespace is Shutdown, start it first
     if (info.state === "Shutdown") {
-      return manager.startAndConnect(info, model);
+      return manager.startAndConnect(info, models);
     }
 
-    return manager.connect(info, model);
+    return manager.connect(info, models);
   });
 
   ipcMain.handle("codespace:disconnect" satisfies IpcChannels, async (_event, name: string): Promise<void> => {

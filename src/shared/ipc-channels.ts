@@ -8,11 +8,20 @@ export type IpcChannels =
   | "proxy:get-status"
   | "token:get-info"
   | "config:get"
-  | "models:get-available"
-  | "models:get-selected"
-  | "models:set-selected"
+  // ---- Per-agent (parametric) ----
+  // List every registered agent { id, displayName, slug, hasFileSnippet, modelHint }
+  | "agents:list"
+  // Get the model list this agent supports (filtered Copilot models)
+  | "agents:get-available-models"
+  // Get/set the user-selected model for one agent
+  | "agents:get-selected-model"
+  | "agents:set-selected-model"
+  // Get the agent-specific config snippet (env vars + optional file) for the AgentConfigPanel
+  | "agents:get-config"
+  // ---- Settings ----
   | "settings:get-auto-start"
   | "settings:set-auto-start"
+  // ---- Codespace ----
   | "codespace:check-gh-cli"
   | "codespace:list"
   | "codespace:list-active-vscode"

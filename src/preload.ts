@@ -16,13 +16,23 @@ const api = {
   // Token
   getTokenInfo: () => ipcRenderer.invoke("token:get-info" satisfies IpcChannels),
 
-  // Config
+  // Top-level config (proxy port etc — agent-agnostic)
   getConfig: () => ipcRenderer.invoke("config:get" satisfies IpcChannels),
 
-  // Models
-  getAvailableModels: () => ipcRenderer.invoke("models:get-available" satisfies IpcChannels),
-  getSelectedModel: () => ipcRenderer.invoke("models:get-selected" satisfies IpcChannels),
-  setSelectedModel: (modelId: string) => ipcRenderer.invoke("models:set-selected" satisfies IpcChannels, modelId),
+  // Per-agent (parametric). All renderers go through this namespace; no
+  // agent-specific channel exists. To add a new agent, register a new
+  // AgentPlugin in main — the renderer doesn't need to learn about it.
+  agents: {
+    list: () => ipcRenderer.invoke("agents:list" satisfies IpcChannels),
+    getAvailableModels: (agentId: string) =>
+      ipcRenderer.invoke("agents:get-available-models" satisfies IpcChannels, agentId),
+    getSelectedModel: (agentId: string) =>
+      ipcRenderer.invoke("agents:get-selected-model" satisfies IpcChannels, agentId),
+    setSelectedModel: (agentId: string, modelId: string) =>
+      ipcRenderer.invoke("agents:set-selected-model" satisfies IpcChannels, agentId, modelId),
+    getConfig: (agentId: string) =>
+      ipcRenderer.invoke("agents:get-config" satisfies IpcChannels, agentId),
+  },
 
   // Settings
   getAutoStart: () => ipcRenderer.invoke("settings:get-auto-start" satisfies IpcChannels),

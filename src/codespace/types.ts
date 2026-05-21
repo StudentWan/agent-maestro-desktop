@@ -43,7 +43,7 @@ export type CodespaceConnectionSource = "manual" | "vscode-auto";
  *
  * Mapping by parent state:
  *   connecting:     allocating-port → opening-tunnel → writing-config
- *                   → verifying-config → starting-health-check
+ *                   → verifying-config → verifying-tunnel → starting-health-check
  *   reconnecting:   checking-state → waiting-backoff → opening-tunnel
  *                   → writing-config → verifying-config
  *   disconnecting:  checking-state → cleaning-remote
@@ -53,6 +53,7 @@ export type CodespaceConnectionPhase =
   | "opening-tunnel"
   | "writing-config"
   | "verifying-config"
+  | "verifying-tunnel"
   | "starting-health-check"
   | "waiting-backoff"
   | "checking-state"
@@ -65,6 +66,8 @@ export interface CodespaceConnectionProgress {
   maxAttempts?: number;
   /** Optional human-readable hint, e.g. "port 23339 in use, retrying". */
   detail?: string;
+  /** Agent plugin being configured (e.g. "claude", "codex"). */
+  pluginId?: string;
 }
 
 /**

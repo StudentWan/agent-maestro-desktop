@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback } from "react";
 import AuthPanel from "./components/AuthPanel";
 import ProxyPanel from "./components/ProxyPanel";
-import ModelSelector from "./components/ModelSelector";
 import SettingsPanel from "./components/SettingsPanel";
 import RequestLog from "./components/RequestLog";
-import ConfigPanel from "./components/ConfigPanel";
+import AgentPanel from "./components/AgentPanel";
 import StatusBar from "./components/StatusBar";
 import CodespacePanel from "./components/CodespacePanel";
-import type { AuthStatus, ProxyStatus, TokenInfo, AppConfig, RequestLogEntry } from "../shared/types";
+import type { AuthStatus, ProxyStatus, AppConfig, RequestLogEntry } from "../shared/types";
+import type { AgentDescriptor } from "../agents/types";
 import type { CopilotBridgeAPI } from "../preload";
 
 declare global {
@@ -25,12 +25,14 @@ export default function App() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ running: false, port: 23337, requestCount: 0 });
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [logs, setLogs] = useState<RequestLogEntry[]>([]);
+  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
 
   // Load initial state
   useEffect(() => {
     api.getAuthStatus().then((s: AuthStatus) => setAuthStatus(s));
     api.getProxyStatus().then((s: ProxyStatus) => setProxyStatus(s));
     api.getConfig().then((c: AppConfig) => setConfig(c));
+    api.agents.list().then((list) => setAgents(list as AgentDescriptor[]));
   }, []);
 
   // Listen for events from main process
@@ -52,10 +54,10 @@ export default function App() {
     };
   }, []);
 
-  // Refresh config when proxy status changes
+  // Refresh top-level config when proxy status changes (port may have moved)
   useEffect(() => {
     api.getConfig().then((c: AppConfig) => setConfig(c));
-  }, [proxyStatus.running]);
+  }, [proxyStatus.running, proxyStatus.port]);
 
   const handleLogin = useCallback(async () => {
     await api.startLogin();
@@ -83,7 +85,7 @@ export default function App() {
       <header className="px-6 py-4 border-b border-gray-700">
         <h1 className="text-xl font-bold">Agent Maestro Desktop</h1>
         <p className="text-sm text-gray-400 mt-1">
-          Anthropic API proxy via GitHub Copilot
+          Coding-agent proxy via GitHub Copilot
         </p>
       </header>
 
@@ -103,16 +105,24 @@ export default function App() {
           />
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <ModelSelector authenticated={authStatus.authenticated} />
-          <SettingsPanel />
-        </div>
+        {/* Per-agent panels — renders one card per registered agent. */}
+        {agents.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {agents.map((agent) => (
+              <AgentPanel
+                key={agent.id}
+                agent={agent}
+                authenticated={authStatus.authenticated}
+                proxyRunning={proxyStatus.running}
+                configReloadKey={config?.proxyPort ?? null}
+              />
+            ))}
+          </div>
+        )}
+
+        <SettingsPanel />
 
         <CodespacePanel authenticated={authStatus.authenticated} />
-
-        {config && proxyStatus.running && (
-          <ConfigPanel config={config} />
-        )}
 
         <RequestLog logs={logs} />
       </main>

@@ -1,11 +1,16 @@
 import { VSCODE_AUTO_BRIDGE_GRACE_MS } from "../shared/constants";
-import type { CodespaceManager } from "./codespace-manager";
+import type { AgentModelMap, CodespaceManager } from "./codespace-manager";
 import type { VsCodeCodespaceDetector } from "./vscode-detector";
 import type { CodespaceInfo } from "./types";
 
 export interface AutoBridgeOrchestratorOptions {
   graceMs?: number;
-  getModel: () => string;
+  /**
+   * Snapshot of "what model is selected per agent right now". Called at
+   * connect-time so each codespace is configured for every registered
+   * agent simultaneously.
+   */
+  getAgentModels: () => AgentModelMap;
 }
 
 /**
@@ -18,7 +23,7 @@ export class AutoBridgeOrchestrator {
   private readonly detector: VsCodeCodespaceDetector;
   private readonly manager: CodespaceManager;
   private readonly graceMs: number;
-  private readonly getModel: () => string;
+  private readonly getAgentModels: () => AgentModelMap;
 
   private readonly pendingDisconnects = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightConnects = new Set<string>();
@@ -33,7 +38,7 @@ export class AutoBridgeOrchestrator {
     this.detector = detector;
     this.manager = manager;
     this.graceMs = options.graceMs ?? VSCODE_AUTO_BRIDGE_GRACE_MS;
-    this.getModel = options.getModel;
+    this.getAgentModels = options.getAgentModels;
   }
 
   start(): void {
@@ -166,9 +171,9 @@ export class AutoBridgeOrchestrator {
             })
           : Promise.resolve();
 
-      const model = this.getModel();
+      const models = this.getAgentModels();
       void cleanup
-        .then(() => this.manager.connect(info, model, "vscode-auto"))
+        .then(() => this.manager.connect(info, models, "vscode-auto"))
         .catch((err) => {
           console.warn(`[AutoBridge] connect ${name} failed:`, err);
         })

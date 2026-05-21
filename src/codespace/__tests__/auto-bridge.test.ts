@@ -43,7 +43,11 @@ class FakeDetector extends EventEmitter {
 class FakeManager {
   connections: CodespaceConnection[] = [];
   connectMock = vi.fn(
-    async (info: CodespaceInfo, _model: string, source: CodespaceConnectionSource = "manual") => {
+    async (
+      info: CodespaceInfo,
+      _models: Record<string, string>,
+      source: CodespaceConnectionSource = "manual",
+    ) => {
       const c = makeConn(info.name, source);
       this.connections.push(c);
       return c;
@@ -52,8 +56,8 @@ class FakeManager {
   disconnectMock = vi.fn(async (name: string) => {
     this.connections = this.connections.filter((c) => c.id !== name);
   });
-  connect(info: CodespaceInfo, model: string, source?: CodespaceConnectionSource) {
-    return this.connectMock(info, model, source);
+  connect(info: CodespaceInfo, models: Record<string, string>, source?: CodespaceConnectionSource) {
+    return this.connectMock(info, models, source);
   }
   disconnect(name: string) {
     return this.disconnectMock(name);
@@ -80,7 +84,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 1000, getModel: () => "claude-opus-4.6" },
+      { graceMs: 1000, getAgentModels: () => ({ claude: "claude-opus-4.6", codex: "" }) },
     );
     orch.start();
 
@@ -91,7 +95,7 @@ describe("AutoBridgeOrchestrator", () => {
     expect(mgr.connectMock).toHaveBeenCalledTimes(1);
     expect(mgr.connectMock).toHaveBeenCalledWith(
       expect.objectContaining({ name: "foo-bar-baz-q" }),
-      "claude-opus-4.6",
+      expect.objectContaining({ claude: "claude-opus-4.6" }),
       "vscode-auto",
     );
   });
@@ -112,7 +116,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 5000, getModel: () => "m" },
+      { graceMs: 5000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();
@@ -148,7 +152,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 5000, getModel: () => "m" },
+      { graceMs: 5000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();
@@ -171,7 +175,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 5000, getModel: () => "m" },
+      { graceMs: 5000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();
@@ -196,7 +200,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 1000, getModel: () => "m" },
+      { graceMs: 1000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
 
@@ -214,7 +218,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 1000, getModel: () => "m" },
+      { graceMs: 1000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();
@@ -236,7 +240,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 5000, getModel: () => "m" },
+      { graceMs: 5000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();
@@ -271,7 +275,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 1000, getModel: () => "m" },
+      { graceMs: 1000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
 
@@ -284,7 +288,7 @@ describe("AutoBridgeOrchestrator", () => {
     expect(mgr.disconnectMock).toHaveBeenCalledWith("foo-bar-baz-q");
     expect(mgr.connectMock).toHaveBeenCalledWith(
       expect.objectContaining({ name: "foo-bar-baz-q" }),
-      "m",
+      { claude: "m", codex: "" },
       "vscode-auto",
     );
   });
@@ -306,7 +310,7 @@ describe("AutoBridgeOrchestrator", () => {
     const orch = new AutoBridgeOrchestrator(
       det as never,
       mgr as never,
-      { graceMs: 5000, getModel: () => "m" },
+      { graceMs: 5000, getAgentModels: () => ({ claude: "m", codex: "" }) },
     );
     orch.start();
     await Promise.resolve();

@@ -9,9 +9,26 @@ const store = new Store<StoreSchema>({
     proxyPort: DEFAULT_PROXY_PORT,
     autoStart: true,
     minimizeToTray: true,
-    selectedModel: null,
+    selectedModels: {},
   },
 });
+
+// One-shot migration from the legacy single-agent `selectedModel` key.
+// We always lived with one agent (Claude) before plugins existed, so any
+// previously-stored value belongs to Claude. After this runs the legacy
+// key is cleared so the migration is idempotent.
+(function migrateLegacySelectedModel() {
+  const legacy = store.get("selectedModel");
+  if (typeof legacy === "string" && legacy.length > 0) {
+    const map = store.get("selectedModels");
+    if (!map.claude) {
+      store.set("selectedModels", { ...map, claude: legacy });
+    }
+  }
+  if (legacy !== undefined) {
+    store.delete("selectedModel" as keyof StoreSchema);
+  }
+})();
 
 export function getGithubToken(): string | null {
   return store.get("githubToken");
@@ -49,12 +66,25 @@ export function getMinimizeToTray(): boolean {
   return store.get("minimizeToTray");
 }
 
-export function getSelectedModel(): string | null {
-  return store.get("selectedModel");
+/** Get the selected model id for one agent (null if never set). */
+export function getSelectedModel(agentId: string): string | null {
+  return store.get("selectedModels")[agentId] ?? null;
 }
 
-export function setSelectedModel(model: string | null): void {
-  store.set("selectedModel", model);
+/** Set/clear the selected model id for one agent. */
+export function setSelectedModel(agentId: string, model: string | null): void {
+  const map = store.get("selectedModels");
+  store.set("selectedModels", { ...map, [agentId]: model });
+}
+
+/** Snapshot of every agent's selected model (for the codespace auto-bridge). */
+export function getAllSelectedModels(): Record<string, string> {
+  const map = store.get("selectedModels");
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    out[k] = v ?? "";
+  }
+  return out;
 }
 
 export default store;

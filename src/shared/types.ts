@@ -70,12 +70,9 @@ export interface RequestLogEntry {
   error?: string;
 }
 
-// Config
+// Config — generic top-level
 export interface AppConfig {
   proxyPort: number;
-  anthropicBaseUrl: string;
-  anthropicAuthToken: string;
-  envVars: Record<string, string>;
 }
 
 // Store
@@ -90,11 +87,13 @@ export interface StoreSchema {
   proxyPort: number;
   autoStart: boolean;
   minimizeToTray: boolean;
-  selectedModel: string | null;
-}
-
-// Model info from Copilot
-export interface ModelInfo {
-  id: string;
-  name: string;
+  /**
+   * Per-agent selected model id. Keys are agent ids (e.g. "claude",
+   * "codex"). The legacy `selectedModel` (a single string) is migrated
+   * into `selectedModels.claude` on first read of the store — see
+   * `src/store/app-store.ts` migration block.
+   */
+  selectedModels: Record<string, string | null>;
+  /** @deprecated kept for one release so the migration can find it. */
+  selectedModel?: string | null;
 }
