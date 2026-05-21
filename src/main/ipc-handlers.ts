@@ -212,6 +212,37 @@ async function removeAllLocalConfigs(port: number): Promise<void> {
 }
 
 /**
+ * Proactively auto-select the first available model for every agent that
+ * doesn't have one yet. Called at login/restore time so codespace config
+ * writes always have a concrete model to write — without this, Codex's
+ * model would stay empty until the user opened the Codex panel in the UI.
+ */
+async function autoSelectModelsForAllAgents(): Promise<void> {
+  if (!tokenManager) return;
+  const results = await Promise.allSettled(
+    AGENTS.map(async (plugin) => {
+      const current = getSelectedModel(plugin.id);
+      if (current && current !== "") return; // already selected
+      try {
+        const models = await plugin.fetchModels(tokenManager!);
+        if (models.length === 0) return;
+        const firstModel = models[0].id;
+        setSelectedModel(plugin.id, firstModel);
+        await plugin.localConfig.writeModel(firstModel).catch(() => {});
+        console.log(`[IPC] Auto-selected first model for ${plugin.id}: ${firstModel}`);
+      } catch (err) {
+        console.warn(`[IPC] Failed to auto-select model for ${plugin.id}:`, err);
+      }
+    }),
+  );
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.warn(`[IPC] autoSelectModelsForAllAgents: ${AGENTS[i].id} rejected:`, r.reason);
+    }
+  });
+}
+
+/**
  * Start the proxy server (always, regardless of auth state).
  * The proxy returns 401 for messages requests when not authenticated.
  */
@@ -222,6 +253,9 @@ async function ensureProxyRunning(): Promise<void> {
   proxyServer = new ProxyServer(port, AGENTS);
   proxyServer.setCopilotClient(copilotClient);
   proxyServer.setLogCallback((entry: RequestLogEntry) => {
+    console.log(
+      `[Proxy] ${entry.method} ${entry.path} → ${entry.status} (${entry.durationMs}ms) model=${entry.model}`,
+    );
     sendToRenderer("proxy:request-log", entry);
   });
 
@@ -261,6 +295,10 @@ async function initializeFromStoredToken(): Promise<boolean> {
 
     // Check codespace-token scopes (independent of the Copilot token).
     await refreshMissingScopes();
+
+    // Ensure every agent has a model selected (especially Codex, which
+    // won't get its UI-driven auto-select until the panel is opened).
+    await autoSelectModelsForAllAgents();
 
     return true;
   } catch (error) {
@@ -316,6 +354,10 @@ async function runCopilotDeviceFlowAndInstallToken(): Promise<AuthStatus> {
   // (e.g., user logged out without revoking the codespace grant). If yes,
   // missingScopes will be [] and the banner stays hidden.
   await refreshMissingScopes();
+
+  // Ensure every agent has a model before anything else touches them
+  // (codespace auto-bridge, local config apply, etc.).
+  await autoSelectModelsForAllAgents();
 
   const status = getAuthStatus();
   sendToRenderer("auth:status-changed", status);

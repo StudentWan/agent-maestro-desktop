@@ -57,6 +57,34 @@ describe('buildCopilotAnthropicHeaders', () => {
     expect(headers['anthropic-beta']).toBeUndefined()
   })
 
+  it('strips unsupported betas like advisor-tool that Copilot rejects with 400', () => {
+    const headers = buildCopilotAnthropicHeaders(
+      'token',
+      {
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+      },
+      { anthropicBeta: 'advisor-tool-2026-03-01,prompt-caching-2024-07-31' },
+    )
+
+    expect(headers['anthropic-beta']).toBe('prompt-caching-2024-07-31')
+  })
+
+  it('strips all betas when none are in the Copilot allowlist', () => {
+    const headers = buildCopilotAnthropicHeaders(
+      'token',
+      {
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 100,
+      },
+      { anthropicBeta: 'advisor-tool-2026-03-01,context-1m-2025-08-07' },
+    )
+
+    expect(headers['anthropic-beta']).toBeUndefined()
+  })
+
   it('sets Copilot vision header when images are present', () => {
     const headers = buildCopilotAnthropicHeaders('token', {
       model: 'claude-sonnet-4-6',

@@ -97,6 +97,16 @@ export class CodespaceManager extends EventEmitter {
     let allCriticalLanded = true;
     for (const plugin of this.plugins) {
       const model = models[plugin.id] ?? "";
+      if (!model && !plugin.remoteConfig.criticalForTunnel) {
+        // Model should have been auto-selected at login — if it's still
+        // empty here, the fetch/auto-select likely failed or hasn't run
+        // yet. Skip the write to avoid unnecessary SSH commands, but warn
+        // so the omission is visible in logs.
+        console.warn(
+          `[CodespaceManager] Skipping remote config for "${plugin.id}" on ${name} — no model selected (expected auto-select to have run)`,
+        );
+        continue;
+      }
       const landed = await this.writePluginRemoteConfigWithRetry(
         name,
         remotePort,
@@ -413,6 +423,35 @@ export class CodespaceManager extends EventEmitter {
       this.updateEntry(info.name, { tunnel: null });
       this.publish(connection);
       throw new Error("Remote config write failed");
+    }
+
+    // Verify the tunnel is still forwarding HTTP traffic after the
+    // config-write SSH sessions. Those extra `gh codespace ssh` invocations
+    // can occasionally disrupt the long-running tunnel process.
+    connection = updateConnection(connection, {
+      progress: { phase: "verifying-tunnel" },
+    });
+    this.publish(connection);
+
+    const tunnelStillUp = await probeReverseTunnel(info.name, remotePort, 5, this.getToken());
+    if (!tunnelStillUp) {
+      console.warn(
+        `[${new Date().toISOString()}] [CodespaceManager] post-config tunnel verification failed ` +
+          `for ${info.name} on :${remotePort} — tunnel may have been disrupted by config writes`,
+      );
+      tunnel.disconnect();
+      this.freePort(remotePort);
+      connection = updateConnection(connection, {
+        connectionState: "error",
+        errorCode: "ssh-tunnel-failed",
+        errorMessage:
+          "SSH tunnel stopped forwarding traffic after remote config was written. " +
+          "Click Reconnect to try again.",
+        progress: undefined,
+      });
+      this.updateEntry(info.name, { tunnel: null });
+      this.publish(connection);
+      throw new Error("Post-config tunnel verification failed");
     }
 
     // Setup reconnect handler
@@ -776,6 +815,18 @@ export class CodespaceManager extends EventEmitter {
         this.connections.set(name, { ...entry, connection: updated, tunnel });
         this.publish(updated);
       });
+
+      // Post-config tunnel verification (same as initial connect path).
+      updated = updateConnection(updated, {
+        progress: { phase: "verifying-tunnel" },
+      });
+      this.connections.set(name, { ...entry, connection: updated, tunnel });
+      this.publish(updated);
+
+      const reconnectTunnelOk = await probeReverseTunnel(name, newPort, 5, this.getToken());
+      if (!reconnectTunnelOk) {
+        throw new Error("Post-config tunnel verification failed on reconnect");
+      }
 
       tunnel.on("unexpectedExit", () => {
         this.handleUnexpectedDisconnect(name, models);

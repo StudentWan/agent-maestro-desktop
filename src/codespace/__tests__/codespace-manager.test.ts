@@ -39,6 +39,7 @@ vi.mock("../gh-cli", () => ({
   executeRemoteCommand: vi.fn(),
   spawnSshTunnel: vi.fn(),
   startCodespace: vi.fn(),
+  probeReverseTunnel: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("../ssh-tunnel", () => {

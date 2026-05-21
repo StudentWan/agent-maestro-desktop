@@ -136,6 +136,14 @@ export function spawnSshTunnel(
       "-R", `${remotePort}:127.0.0.1:${localPort}`,
       "-o", "ServerAliveInterval=15",
       "-o", "ServerAliveCountMax=3",
+      // Prevent SSH connection sharing: config-write commands (which run
+      // via separate `gh codespace ssh` invocations) could otherwise
+      // multiplex over this connection's control socket. If a config-write
+      // session triggers a channel error, it would tear down the shared
+      // connection — killing the reverse port forward even though the SSH
+      // process stays alive. Isolating the tunnel avoids this.
+      "-o", "ControlMaster=no",
+      "-o", "ControlPath=none",
       "-N",
     ],
     {
@@ -160,19 +168,22 @@ export async function executeRemoteCommand(
 }
 
 /**
- * Verify the reverse SSH tunnel is actually accepting connections by opening
- * a TCP socket to 127.0.0.1:remotePort *from inside the codespace*. A bare
- * SSH process being alive does NOT imply `-R` has bound and is forwarding —
- * the kernel may not have set up the listening socket yet when SSH first
- * reports the channel as open.
+ * Verify the reverse SSH tunnel is actually forwarding HTTP traffic by
+ * hitting the proxy's /health endpoint from inside the codespace.
  *
- * Implemented as a single SSH exec running a bash loop in the codespace, so
- * a fast-bound tunnel returns in ~1s without spamming SSH with poll-per-tick
- * sessions. The bash loop polls every 500ms for at most `timeoutSec` seconds.
+ * Previous implementation only tested TCP connectivity (bash /dev/tcp),
+ * which can give false positives: SSH may bind the listening port before
+ * the forwarding channel is fully operational, so a bare socket connect
+ * succeeds but actual data never reaches the local proxy.
  *
- * Returns true iff the codespace observed a successful connect within the
- * window. Any error (SSH failure, gh CLI hiccup) yields false — the caller
- * decides what to do with that.
+ * Now prefers `curl -sf /health` for a true end-to-end check (HTTP
+ * request → tunnel → local proxy → 200 response → back). Falls back to
+ * the /dev/tcp probe when curl is not installed in the codespace image
+ * (rare but possible in stripped-down containers).
+ *
+ * Returns true iff the codespace observed a successful response within
+ * the window. Any error (SSH failure, gh CLI hiccup) yields false — the
+ * caller decides what to do with that.
  */
 export async function probeReverseTunnel(
   codespaceName: string,
@@ -181,14 +192,21 @@ export async function probeReverseTunnel(
   token?: string,
 ): Promise<boolean> {
   const iterations = Math.max(1, Math.floor(timeoutSec * 2));
-  // Single quotes inside the bash -c string are safe because we wrap with
-  // double quotes; the inner script does not need any host-side variable
-  // expansion (REMOTE_PORT is a JS template substitution, not a shell var).
+  // Prefer curl for end-to-end HTTP verification; fall back to TCP-only
+  // (/dev/tcp) for images without curl. The curl path catches tunnels
+  // that bind but don't forward — the most common false-positive.
   const script =
+    `if command -v curl >/dev/null 2>&1; then ` +
+    `for i in $(seq 1 ${iterations}); do ` +
+    `if curl -sf --max-time 2 http://127.0.0.1:${remotePort}/health >/dev/null 2>&1; then ` +
+    `echo READY; exit 0; fi; ` +
+    `sleep 0.5; done; ` +
+    `else ` +
     `for i in $(seq 1 ${iterations}); do ` +
     `if (exec 3<>/dev/tcp/127.0.0.1/${remotePort}) 2>/dev/null; then ` +
     `exec 3<&-; exec 3>&-; echo READY; exit 0; fi; ` +
-    `sleep 0.5; done; echo NOT_READY; exit 1`;
+    `sleep 0.5; done; ` +
+    `fi; echo NOT_READY; exit 1`;
   const cmd = `bash -c '${script}'`;
   // Generous overhead over the bash loop so the SSH exec itself isn't what
   // times out: bash needs ≈ timeoutSec, SSH handshake adds a few seconds.

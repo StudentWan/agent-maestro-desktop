@@ -62,7 +62,13 @@ function prepareCopilotAnthropicRequest(
     model: resolveCopilotClaudeModel(request.model, options),
     stream,
   });
-  return normalizeReasoningForCopilot(adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest)));
+  const prepared = normalizeReasoningForCopilot(adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest)));
+  // Copilot never accepts context_management — strip unconditionally.
+  if ("context_management" in prepared) {
+    const { context_management: _, ...rest } = prepared;
+    return rest as AnthropicRequest;
+  }
+  return prepared;
 }
 
 function stripUnsupportedCopilotTools(request: AnthropicRequest): AnthropicRequest {

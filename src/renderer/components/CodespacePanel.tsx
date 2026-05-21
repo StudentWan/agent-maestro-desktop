@@ -78,6 +78,8 @@ function describeProgress(
     }
     case "verifying-config":
       return `Verifying remote config landed${attemptSuffix}`;
+    case "verifying-tunnel":
+      return "Verifying tunnel connectivity...";
     case "starting-health-check":
       return "Starting health check...";
     case "waiting-backoff":

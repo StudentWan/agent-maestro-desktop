@@ -18,9 +18,20 @@ export function hasContext1mBeta(anthropicBeta?: string): boolean {
   return parseAnthropicBeta(anthropicBeta).some((beta) => /^context-1m(?:-|$)/.test(beta));
 }
 
+/**
+ * Allowlist of beta-header patterns that the Copilot Anthropic endpoint is
+ * known to accept. Everything else (context-1m, advisor-tool, etc.) is
+ * stripped before the request is forwarded — an unknown beta causes a
+ * hard 400 from Copilot, whereas a stripped-but-supported beta just loses
+ * that feature gracefully.
+ *
+ * Add new patterns here as Copilot adds support.
+ */
+const COPILOT_SUPPORTED_BETA_RE = /^(?:prompt-caching|output-128k|token-counting|interleaved-thinking|extended-thinking)(?:-|$)/;
+
 export function filterCopilotAnthropicBeta(anthropicBeta?: string): string | undefined {
   const supportedBetas = parseAnthropicBeta(anthropicBeta).filter(
-    (beta) => !/^context-1m(?:-|$)/.test(beta),
+    (beta) => COPILOT_SUPPORTED_BETA_RE.test(beta),
   );
   return supportedBetas.length > 0 ? supportedBetas.join(",") : undefined;
 }
