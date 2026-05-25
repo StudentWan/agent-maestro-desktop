@@ -25,10 +25,13 @@
  * that would otherwise creep in once we have a TOML emitter with literal
  * `"` chars in it.
  *
- * Requires Python 3.11+ in the codespace image (true for every official
- * `mcr.microsoft.com/devcontainers/...` base in recent years). If not
- * available, the script fails and the codespace manager logs a warning;
- * the tunnel stays up because Codex's `criticalForTunnel` is false.
+ * Requires Python 3 in the codespace image (true for every official
+ * `mcr.microsoft.com/devcontainers/...` base). Parsing uses `tomllib`
+ * (3.11+) or `tomli` when available; otherwise falls back to an
+ * embedded pure-stdlib parser that covers the subset of TOML real
+ * Codex configs use. If parsing fails the script still falls through
+ * to `{}` — the tunnel stays up because Codex's `criticalForTunnel`
+ * is false.
  */
 import { ATOMIC_DUMP_HELPER } from "../../codespace/atomic-dump";
 
@@ -115,22 +118,260 @@ def _toml_dump(data):
 
 /**
  * Inline a Python helper that parses the existing config.toml (empty
- * dict if missing or unparseable). Uses tomllib (3.11+) with a tomli
- * fallback for older images.
+ * dict if missing or unparseable). Tries `tomllib` (3.11+) and `tomli`
+ * first; falls back to an embedded pure-stdlib parser when neither is
+ * available — which is the common case on Codespace images shipping
+ * Python 3.10 with no third-party packages.
+ *
+ * The embedded parser handles the subset of TOML that realistic Codex
+ * configs use: scalars (strings, ints, floats, bools), arrays of
+ * scalars, inline tables, dotted keys, `[a.b.c]` section headers, and
+ * line comments. Multi-line strings and array-of-tables `[[a]]` are
+ * not supported — if encountered we fall through to `{}` (same
+ * silent-fallback contract as before: a broken file gets overwritten).
  */
 const PARSE_HELPER = `
+def _parse_toml(text):
+    src = text
+    n = len(src)
+    pos = [0]
+
+    def err(msg):
+        line = src.count('\\n', 0, pos[0]) + 1
+        raise ValueError('TOML parse error at line %d: %s' % (line, msg))
+
+    def peek(off=0):
+        p = pos[0] + off
+        return src[p] if p < n else ''
+
+    def skip_ws():
+        while pos[0] < n and src[pos[0]] in ' \\t':
+            pos[0] += 1
+
+    def skip_ws_nl_comments():
+        while pos[0] < n:
+            c = src[pos[0]]
+            if c in ' \\t\\r\\n':
+                pos[0] += 1
+            elif c == '#':
+                while pos[0] < n and src[pos[0]] != '\\n':
+                    pos[0] += 1
+            else:
+                break
+
+    def skip_eol():
+        skip_ws()
+        if pos[0] < n and src[pos[0]] == '#':
+            while pos[0] < n and src[pos[0]] != '\\n':
+                pos[0] += 1
+        if pos[0] < n and src[pos[0]] == '\\n':
+            pos[0] += 1
+
+    def parse_basic_string():
+        pos[0] += 1
+        if peek() == '"' and peek(1) == '"':
+            err('multi-line strings not supported')
+        out = []
+        while pos[0] < n:
+            c = src[pos[0]]
+            if c == '"':
+                pos[0] += 1
+                return ''.join(out)
+            if c == '\\\\':
+                pos[0] += 1
+                if pos[0] >= n: err('unterminated escape')
+                e = src[pos[0]]; pos[0] += 1
+                if   e == 'n':  out.append('\\n')
+                elif e == 'r':  out.append('\\r')
+                elif e == 't':  out.append('\\t')
+                elif e == 'b':  out.append('\\b')
+                elif e == 'f':  out.append('\\f')
+                elif e == '\\\\': out.append('\\\\')
+                elif e == '"':  out.append('"')
+                elif e == '/':  out.append('/')
+                elif e == 'u':
+                    out.append(chr(int(src[pos[0]:pos[0]+4], 16))); pos[0] += 4
+                elif e == 'U':
+                    out.append(chr(int(src[pos[0]:pos[0]+8], 16))); pos[0] += 8
+                else:
+                    err('bad escape')
+            elif c == '\\n':
+                err('newline in basic string')
+            else:
+                out.append(c); pos[0] += 1
+        err('unterminated string')
+
+    def parse_literal_string():
+        pos[0] += 1
+        if peek() == "'" and peek(1) == "'":
+            err('multi-line strings not supported')
+        start = pos[0]
+        while pos[0] < n and src[pos[0]] != "'":
+            if src[pos[0]] == '\\n':
+                err('newline in literal string')
+            pos[0] += 1
+        if pos[0] >= n: err('unterminated literal string')
+        s = src[start:pos[0]]; pos[0] += 1
+        return s
+
+    def parse_key():
+        c = peek()
+        if c == '"': return parse_basic_string()
+        if c == "'": return parse_literal_string()
+        start = pos[0]
+        while pos[0] < n and (src[pos[0]].isalnum() or src[pos[0]] in '_-'):
+            pos[0] += 1
+        if start == pos[0]: err('expected key')
+        return src[start:pos[0]]
+
+    def parse_dotted_key():
+        keys = [parse_key()]
+        while True:
+            skip_ws()
+            if peek() == '.':
+                pos[0] += 1; skip_ws()
+                keys.append(parse_key())
+            else:
+                break
+        return keys
+
+    def parse_number():
+        start = pos[0]
+        if peek() in '+-': pos[0] += 1
+        while pos[0] < n and src[pos[0]] in '0123456789._eE+-':
+            pos[0] += 1
+        s = src[start:pos[0]].replace('_', '')
+        if not s: err('expected number')
+        try:
+            if any(c in s for c in '.eE'): return float(s)
+            return int(s)
+        except ValueError:
+            err('bad number')
+
+    def parse_value():
+        c = peek()
+        if c == '"':  return parse_basic_string()
+        if c == "'":  return parse_literal_string()
+        if c == '[':  return parse_array()
+        if c == '{':  return parse_inline_table()
+        if src[pos[0]:pos[0]+4] == 'true':  pos[0] += 4; return True
+        if src[pos[0]:pos[0]+5] == 'false': pos[0] += 5; return False
+        return parse_number()
+
+    def parse_array():
+        pos[0] += 1
+        items = []
+        skip_ws_nl_comments()
+        if peek() == ']':
+            pos[0] += 1; return items
+        while True:
+            items.append(parse_value())
+            skip_ws_nl_comments()
+            if peek() == ',':
+                pos[0] += 1; skip_ws_nl_comments()
+                if peek() == ']':
+                    pos[0] += 1; return items
+            elif peek() == ']':
+                pos[0] += 1; return items
+            else:
+                err('expected , or ] in array')
+
+    def parse_inline_table():
+        pos[0] += 1
+        table = {}
+        skip_ws()
+        if peek() == '}':
+            pos[0] += 1; return table
+        while True:
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != '=': err('expected = in inline table')
+            pos[0] += 1; skip_ws()
+            val = parse_value()
+            t = table
+            for k in keys[:-1]:
+                if k not in t: t[k] = {}
+                t = t[k]
+            t[keys[-1]] = val
+            skip_ws()
+            if peek() == ',':
+                pos[0] += 1; skip_ws()
+            elif peek() == '}':
+                pos[0] += 1; return table
+            else:
+                err('expected , or } in inline table')
+
+    result = {}
+    current = result
+    skip_ws_nl_comments()
+    while pos[0] < n:
+        if peek() == '[':
+            pos[0] += 1
+            if peek() == '[':
+                err('array-of-tables not supported')
+            skip_ws()
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != ']': err('expected ]')
+            pos[0] += 1
+            d = result
+            for k in keys:
+                if k not in d: d[k] = {}
+                if not isinstance(d[k], dict):
+                    err('key collides with non-table value')
+                d = d[k]
+            current = d
+        else:
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != '=':
+                err('expected =')
+            pos[0] += 1; skip_ws()
+            val = parse_value()
+            t = current
+            for k in keys[:-1]:
+                if k not in t: t[k] = {}
+                t = t[k]
+            t[keys[-1]] = val
+        skip_eol()
+        skip_ws_nl_comments()
+    return result
+
 def _read_config(path):
     try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib
-    try:
         with open(path, 'rb') as f:
-            return tomllib.load(f)
+            raw = f.read()
     except FileNotFoundError:
         return {}
     except Exception:
         return {}
+    if not raw.strip():
+        return {}
+    try:
+        text = raw.decode('utf-8')
+    except Exception:
+        return {}
+    # Try tomllib (3.11+) then tomli; if neither is importable, fall
+    # back to the embedded parser. Many Codespace images ship Python
+    # 3.10 with no tomli — without this fallback the whole script
+    # crashed on the unhandled ImportError.
+    parsers = []
+    try:
+        import tomllib
+        parsers.append(tomllib.loads)
+    except ImportError:
+        try:
+            import tomli
+            parsers.append(tomli.loads)
+        except ImportError:
+            pass
+    parsers.append(_parse_toml)
+    for parse in parsers:
+        try:
+            return parse(text)
+        except Exception:
+            continue
+    return {}
 `;
 
 /**

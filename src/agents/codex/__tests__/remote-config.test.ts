@@ -31,9 +31,11 @@ describe("Codex remote-config script generators", () => {
     expect(script).toContain("_atomic_dump_text");
     expect(script).toContain("_read_config");
     expect(script).toContain("_toml_dump");
-    // tomllib (3.11+) with tomli fallback.
+    // tomllib (3.11+) with tomli + embedded-parser fallback for 3.10
+    // codespace images.
     expect(script).toContain("import tomllib");
     expect(script).toContain("import tomli");
+    expect(script).toContain("def _parse_toml(");
   });
 
   it("update-model script sets only the model field", () => {
