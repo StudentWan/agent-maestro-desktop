@@ -2,225 +2,476 @@
  * Generates Python3 shell scripts that run inside GitHub Codespaces
  * to configure Codex CLI's `~/.codex/config.toml`.
  *
- * Same atomic-write contract as the Claude remote-config: serialize to a
- * sibling tmp file, fsync, os.replace onto the target. The shared helper
- * `_atomic_dump_text` (text-only) lives in `src/codespace/atomic-dump.ts`.
+ * Strategy mirrors the local writer in `src/agents/codex/local-config.ts`
+ * (which uses `smol-toml` to do a parse → merge → stringify roundtrip):
  *
- * Why marker-comment splicing instead of "write our own TOML parser
- * inside Python":
- *   - Codex users frequently put `[mcp_servers.*]`, custom profiles,
- *     etc. in this file. We must NEVER clobber any of that.
- *   - Python ≤3.10 ships without `tomllib`; we'd need to bundle / install
- *     a parser. Marker splicing needs nothing beyond stdlib + grep.
- *   - The same marker-comment block is used by the LOCAL writer
- *     (`src/agents/codex/local-config.ts`), so behaviour is symmetric
- *     between local config and codespace config.
+ *   1. Read the existing file (empty dict if missing).
+ *   2. Parse it with `tomllib` (Python 3.11+; falls back to `tomli`).
+ *   3. Merge our keys onto the parsed dict.
+ *   4. Re-emit as TOML using a small inline serializer.
+ *   5. Atomic-write via the shared `_atomic_dump_text` helper.
  *
- * The scripts assume Python3 is available in the codespace image — true
- * for every official `mcr.microsoft.com/devcontainers/...` base. The
- * remote-config retry loop in `CodespaceManager.writePluginRemoteConfigWithRetry`
- * catches failures cleanly if it isn't.
+ * We DO NOT preserve user comments or whitespace (tomllib doesn't expose
+ * them; neither does smol-toml). This is the same trade-off the local
+ * writer accepts. In exchange, root-level keys (`model_provider`,
+ * `model`) are guaranteed to land above any `[table]` header instead of
+ * being silently absorbed into the user's last table — which is exactly
+ * the bug the previous marker-comment splice approach had.
+ *
+ * Python source is shipped to the codespace as a quoted-delimiter
+ * here-doc (`python3 <<'PY_HEREDOC' ... PY_HEREDOC`). The quoted delimiter
+ * disables shell interpolation, so the body passes through verbatim —
+ * no `\\\\\\\\` escape stacks, no double-quote-shell-termination footguns
+ * that would otherwise creep in once we have a TOML emitter with literal
+ * `"` chars in it.
+ *
+ * Requires Python 3 in the codespace image (true for every official
+ * `mcr.microsoft.com/devcontainers/...` base). Parsing uses `tomllib`
+ * (3.11+) or `tomli` when available; otherwise falls back to an
+ * embedded pure-stdlib parser that covers the subset of TOML real
+ * Codex configs use. If parsing fails the script still falls through
+ * to `{}` — the tunnel stays up because Codex's `criticalForTunnel`
+ * is false.
  */
 import { ATOMIC_DUMP_HELPER } from "../../codespace/atomic-dump";
 
-const MARKER_BEGIN = "# >>> agent-maestro-managed >>>";
-const MARKER_END = "# <<< agent-maestro-managed <<<";
 const PROVIDER_NAME = "agent-maestro";
+const PROVIDER_DISPLAY = "Agent Maestro Desktop";
 
 /**
- * Shell command that prints a positive integer to stdout when the Codex
- * managed marker is present. The codespace manager runs this after each
- * write attempt and retries until it returns ≥1 (or attempts exhausted).
+ * Shell command that prints a positive integer to stdout when our
+ * provider section is present. The codespace manager runs this after
+ * each write attempt and retries until it returns ≥1 (or attempts
+ * exhausted). Fixed-string grep so the brackets don't need escaping.
  */
 export const CODEX_VERIFY_MARKER_COMMAND =
-  "cat ~/.codex/config.toml 2>/dev/null | grep -c agent-maestro-managed || true";
-
-/** Escape a value for embedding in a Python single-quoted string. */
-function escapePython(value: string): string {
-  return value.replace(/\\/g, "").replace(/'/g, "");
-}
-
-/** Escape a value for the TOML string we emit FROM Python. */
-function escapeTomlForPython(value: string): string {
-  // First strip Python-dangerous chars, then escape for TOML.
-  return escapePython(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
+  "cat ~/.codex/config.toml 2>/dev/null | grep -cF '[model_providers.agent-maestro]' || true";
 
 /**
- * Build the body that goes BETWEEN the marker comments. Mirrors the
- * local-config renderer exactly so users see the same content whether they
- * inspect the file locally or in a codespace.
+ * Reject any user-supplied string (model id) that would break out of a
+ * Python single-quoted literal or smuggle a newline into the here-doc.
+ * The codespace manager calls these builders with model ids from our
+ * own model list, but defence-in-depth: strip anything not in a safe
+ * subset before embedding.
  */
-function buildManagedBlockBody(port: number | null, model: string | null): string {
-  const lines: string[] = [];
-  lines.push("# Managed by Agent Maestro Desktop. Do not edit manually --");
-  lines.push("# changes inside this block will be overwritten. Anything OUTSIDE");
-  lines.push("# the markers is preserved verbatim.");
-  lines.push(`model_provider = "${PROVIDER_NAME}"`);
-  if (model) {
-    lines.push(`model = "${escapeTomlForPython(model)}"`);
-  }
-  lines.push("");
-  lines.push(`[model_providers.${PROVIDER_NAME}]`);
-  lines.push(`name = "Agent Maestro Desktop"`);
-  if (port !== null) {
-    lines.push(`base_url = "http://127.0.0.1:${port}/codex/v1"`);
-  }
-  lines.push(`wire_api = "responses"`);
-  lines.push(`request_timeout = 600`);
-  lines.push(`__agent_maestro_managed = true`);
-  return lines.join("\n");
+function safeModelLiteral(value: string): string {
+  // Conservative: letters, digits, dot, dash, underscore, slash, colon.
+  return value.replace(/[^A-Za-z0-9._\-/:]/g, "");
 }
 
 /**
- * Inline a Python helper that performs the marker-block splice. Defined
- * once per script (cheap; the script string is throwaway). Mirrors the
- * TypeScript splicer in `local-config.ts` so behaviour matches between
- * local writes and remote writes.
+ * Inline a tiny Python TOML emitter. tomllib (3.11+) gives us parsing
+ * but has no writer; we only need to emit dicts of:
+ *   - scalars (strings, ints, floats, bools)
+ *   - arrays of scalars
+ *   - nested dicts (emitted as `[a.b.c]` section headers; inline tables
+ *     are used for dicts that appear *inside* a value position).
  *
- * The managed block is ALWAYS written at the TOP of the file. Codex's
- * `model_provider` / `model` are TOML root-level keys; if they appear
- * after any `[table]` header (e.g. user's `[mcp_servers.*]`) they get
- * silently absorbed into that table. On every call we strip any existing
- * block (wherever it is) and re-insert at the top — which also auto-
- * migrates files written by older versions that appended at the bottom.
+ * The emitter is good enough for any config a Codex user would realistically
+ * have — `[mcp_servers.*]`, `[profiles.*]`, other `[model_providers.*]`
+ * entries, root-level scalar options. It's not a general TOML writer.
  */
-const SPLICE_HELPER = `
-def _strip_block(existing):
-    begin = '${MARKER_BEGIN}'
-    end = '${MARKER_END}'
-    bi = existing.find(begin)
-    ei = existing.find(end)
-    if bi == -1 or ei == -1 or ei <= bi:
-        return existing
-    line_end = existing.find('\\n', ei)
-    if line_end == -1:
-        line_end = len(existing)
-    else:
-        line_end += 1
-    before = existing[:bi]
-    after = existing[line_end:]
-    # Collapse trailing newlines on 'before' to at most one so removing a
-    # mid-file block doesn't leave a doubled blank line behind.
-    if before:
-        i = len(before)
-        while i > 0 and before[i - 1] == '\\n':
-            i -= 1
-        before = before[:i] + '\\n'
-    return before + after
+const TOML_EMITTER = `
+def _toml_key(k):
+    if k and all((c.isalnum() or c in '_-') for c in k):
+        return k
+    return '"' + k.replace('\\\\', '\\\\\\\\').replace('"', '\\\\"') + '"'
 
-def _splice_block(existing, body):
-    begin = '${MARKER_BEGIN}'
-    end = '${MARKER_END}'
-    stripped = _strip_block(existing)
-    if body is None:
-        return '' if not stripped.strip() else stripped
-    block = begin + '\\n' + body + '\\n' + end
-    # Drop leading newlines from user content so we control spacing.
-    remainder = stripped.lstrip('\\n')
-    if not remainder:
-        return block + '\\n'
-    return block + '\\n\\n' + remainder
+def _toml_value(v):
+    if v is True: return 'true'
+    if v is False: return 'false'
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float): return repr(v)
+    if isinstance(v, str):
+        s = v.replace('\\\\', '\\\\\\\\').replace('"', '\\\\"')
+        s = s.replace('\\n', '\\\\n').replace('\\r', '\\\\r').replace('\\t', '\\\\t')
+        return '"' + s + '"'
+    if isinstance(v, list):
+        return '[' + ', '.join(_toml_value(x) for x in v) + ']'
+    if isinstance(v, dict):
+        parts = [_toml_key(k) + ' = ' + _toml_value(vv) for k, vv in v.items()]
+        return '{ ' + ', '.join(parts) + ' }'
+    raise TypeError('unsupported TOML value: ' + type(v).__name__)
+
+def _toml_dump(data):
+    lines = []
+    def emit(d, prefix):
+        scalars = []
+        tables = []
+        for k, v in d.items():
+            if isinstance(v, dict) and v:
+                tables.append((k, v))
+            else:
+                scalars.append((k, v))
+        for k, v in scalars:
+            lines.append(_toml_key(k) + ' = ' + _toml_value(v))
+        for k, v in tables:
+            path = (prefix + '.' + _toml_key(k)) if prefix else _toml_key(k)
+            has_own_scalars = any(not (isinstance(vv, dict) and vv) for vv in v.values())
+            if has_own_scalars:
+                if lines: lines.append('')
+                lines.append('[' + path + ']')
+            emit(v, path)
+    emit(data, '')
+    return '\\n'.join(lines) + '\\n'
 `;
 
 /**
- * Build the Python3 -c invocation that splices our managed block into
- * `~/.codex/config.toml`, atomically. Used by `applyConfig` and
- * `writeModel`.
+ * Inline a Python helper that parses the existing config.toml (empty
+ * dict if missing or unparseable). Tries `tomllib` (3.11+) and `tomli`
+ * first; falls back to an embedded pure-stdlib parser when neither is
+ * available — which is the common case on Codespace images shipping
+ * Python 3.10 with no third-party packages.
+ *
+ * The embedded parser handles the subset of TOML that realistic Codex
+ * configs use: scalars (strings, ints, floats, bools), arrays of
+ * scalars, inline tables, dotted keys, `[a.b.c]` section headers, and
+ * line comments. Multi-line strings and array-of-tables `[[a]]` are
+ * not supported — if encountered we fall through to `{}` (same
+ * silent-fallback contract as before: a broken file gets overwritten).
  */
-function buildSpliceScript(blockBody: string | null): string {
-  // The marker body is embedded as a Python triple-quoted string inside a
-  // `python3 -c "..."` shell command. Two layers of escaping:
-  //   1. Shell: `"` must become `\"` so it doesn't terminate the outer "...".
-  //      Bash strips the backslash, so Python receives a bare `"` — correct.
-  //   2. Python: guard against `'''` inside the body (shouldn't happen for
-  //      our TOML, but cheap insurance).
-  const shellSafe = blockBody?.replace(/"/g, '\\"') ?? null;
-  const safeBody =
-    shellSafe === null
-      ? "None"
-      : `'''${shellSafe.replace(/'''/g, "'\\''\\''\\'")}'''`;
-  return `python3 -c "
-import os
-${ATOMIC_DUMP_HELPER}
-${SPLICE_HELPER}
-p = os.path.expanduser('~/.codex/config.toml')
-try:
-    existing = open(p).read()
-except FileNotFoundError:
-    existing = ''
-body = ${safeBody}
-out = _splice_block(existing, body)
-if out == '':
-    _atomic_dump_text('', p)
-else:
-    _atomic_dump_text(out, p)
-"`;
+const PARSE_HELPER = `
+def _parse_toml(text):
+    src = text
+    n = len(src)
+    pos = [0]
+
+    def err(msg):
+        line = src.count('\\n', 0, pos[0]) + 1
+        raise ValueError('TOML parse error at line %d: %s' % (line, msg))
+
+    def peek(off=0):
+        p = pos[0] + off
+        return src[p] if p < n else ''
+
+    def skip_ws():
+        while pos[0] < n and src[pos[0]] in ' \\t':
+            pos[0] += 1
+
+    def skip_ws_nl_comments():
+        while pos[0] < n:
+            c = src[pos[0]]
+            if c in ' \\t\\r\\n':
+                pos[0] += 1
+            elif c == '#':
+                while pos[0] < n and src[pos[0]] != '\\n':
+                    pos[0] += 1
+            else:
+                break
+
+    def skip_eol():
+        skip_ws()
+        if pos[0] < n and src[pos[0]] == '#':
+            while pos[0] < n and src[pos[0]] != '\\n':
+                pos[0] += 1
+        if pos[0] < n and src[pos[0]] == '\\n':
+            pos[0] += 1
+
+    def parse_basic_string():
+        pos[0] += 1
+        if peek() == '"' and peek(1) == '"':
+            err('multi-line strings not supported')
+        out = []
+        while pos[0] < n:
+            c = src[pos[0]]
+            if c == '"':
+                pos[0] += 1
+                return ''.join(out)
+            if c == '\\\\':
+                pos[0] += 1
+                if pos[0] >= n: err('unterminated escape')
+                e = src[pos[0]]; pos[0] += 1
+                if   e == 'n':  out.append('\\n')
+                elif e == 'r':  out.append('\\r')
+                elif e == 't':  out.append('\\t')
+                elif e == 'b':  out.append('\\b')
+                elif e == 'f':  out.append('\\f')
+                elif e == '\\\\': out.append('\\\\')
+                elif e == '"':  out.append('"')
+                elif e == '/':  out.append('/')
+                elif e == 'u':
+                    out.append(chr(int(src[pos[0]:pos[0]+4], 16))); pos[0] += 4
+                elif e == 'U':
+                    out.append(chr(int(src[pos[0]:pos[0]+8], 16))); pos[0] += 8
+                else:
+                    err('bad escape')
+            elif c == '\\n':
+                err('newline in basic string')
+            else:
+                out.append(c); pos[0] += 1
+        err('unterminated string')
+
+    def parse_literal_string():
+        pos[0] += 1
+        if peek() == "'" and peek(1) == "'":
+            err('multi-line strings not supported')
+        start = pos[0]
+        while pos[0] < n and src[pos[0]] != "'":
+            if src[pos[0]] == '\\n':
+                err('newline in literal string')
+            pos[0] += 1
+        if pos[0] >= n: err('unterminated literal string')
+        s = src[start:pos[0]]; pos[0] += 1
+        return s
+
+    def parse_key():
+        c = peek()
+        if c == '"': return parse_basic_string()
+        if c == "'": return parse_literal_string()
+        start = pos[0]
+        while pos[0] < n and (src[pos[0]].isalnum() or src[pos[0]] in '_-'):
+            pos[0] += 1
+        if start == pos[0]: err('expected key')
+        return src[start:pos[0]]
+
+    def parse_dotted_key():
+        keys = [parse_key()]
+        while True:
+            skip_ws()
+            if peek() == '.':
+                pos[0] += 1; skip_ws()
+                keys.append(parse_key())
+            else:
+                break
+        return keys
+
+    def parse_number():
+        start = pos[0]
+        if peek() in '+-': pos[0] += 1
+        while pos[0] < n and src[pos[0]] in '0123456789._eE+-':
+            pos[0] += 1
+        s = src[start:pos[0]].replace('_', '')
+        if not s: err('expected number')
+        try:
+            if any(c in s for c in '.eE'): return float(s)
+            return int(s)
+        except ValueError:
+            err('bad number')
+
+    def parse_value():
+        c = peek()
+        if c == '"':  return parse_basic_string()
+        if c == "'":  return parse_literal_string()
+        if c == '[':  return parse_array()
+        if c == '{':  return parse_inline_table()
+        if src[pos[0]:pos[0]+4] == 'true':  pos[0] += 4; return True
+        if src[pos[0]:pos[0]+5] == 'false': pos[0] += 5; return False
+        return parse_number()
+
+    def parse_array():
+        pos[0] += 1
+        items = []
+        skip_ws_nl_comments()
+        if peek() == ']':
+            pos[0] += 1; return items
+        while True:
+            items.append(parse_value())
+            skip_ws_nl_comments()
+            if peek() == ',':
+                pos[0] += 1; skip_ws_nl_comments()
+                if peek() == ']':
+                    pos[0] += 1; return items
+            elif peek() == ']':
+                pos[0] += 1; return items
+            else:
+                err('expected , or ] in array')
+
+    def parse_inline_table():
+        pos[0] += 1
+        table = {}
+        skip_ws()
+        if peek() == '}':
+            pos[0] += 1; return table
+        while True:
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != '=': err('expected = in inline table')
+            pos[0] += 1; skip_ws()
+            val = parse_value()
+            t = table
+            for k in keys[:-1]:
+                if k not in t: t[k] = {}
+                t = t[k]
+            t[keys[-1]] = val
+            skip_ws()
+            if peek() == ',':
+                pos[0] += 1; skip_ws()
+            elif peek() == '}':
+                pos[0] += 1; return table
+            else:
+                err('expected , or } in inline table')
+
+    result = {}
+    current = result
+    skip_ws_nl_comments()
+    while pos[0] < n:
+        if peek() == '[':
+            pos[0] += 1
+            if peek() == '[':
+                err('array-of-tables not supported')
+            skip_ws()
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != ']': err('expected ]')
+            pos[0] += 1
+            d = result
+            for k in keys:
+                if k not in d: d[k] = {}
+                if not isinstance(d[k], dict):
+                    err('key collides with non-table value')
+                d = d[k]
+            current = d
+        else:
+            keys = parse_dotted_key()
+            skip_ws()
+            if peek() != '=':
+                err('expected =')
+            pos[0] += 1; skip_ws()
+            val = parse_value()
+            t = current
+            for k in keys[:-1]:
+                if k not in t: t[k] = {}
+                t = t[k]
+            t[keys[-1]] = val
+        skip_eol()
+        skip_ws_nl_comments()
+    return result
+
+def _read_config(path):
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        text = raw.decode('utf-8')
+    except Exception:
+        return {}
+    # Try tomllib (3.11+) then tomli; if neither is importable, fall
+    # back to the embedded parser. Many Codespace images ship Python
+    # 3.10 with no tomli — without this fallback the whole script
+    # crashed on the unhandled ImportError.
+    parsers = []
+    try:
+        import tomllib
+        parsers.append(tomllib.loads)
+    except ImportError:
+        try:
+            import tomli
+            parsers.append(tomli.loads)
+        except ImportError:
+            pass
+    parsers.append(_parse_toml)
+    for parse in parsers:
+        try:
+            return parse(text)
+        except Exception:
+            continue
+    return {}
+`;
+
+/**
+ * Wrap a Python body in a quoted-delimiter here-doc so the shell does
+ * not interpret backslashes or double-quotes inside it. The remote `sh`
+ * receives a single command string from `gh codespace ssh -- <cmd>`
+ * and runs it through its own shell; the here-doc passes the Python
+ * source through verbatim regardless.
+ */
+function pythonHeredoc(body: string): string {
+  // `PY_HEREDOC` is unique enough that it won't collide with any line of
+  // our script. The single-quoted delimiter (`<<'PY_HEREDOC'`) disables
+  // all expansion inside the body.
+  return `python3 <<'PY_HEREDOC'\n${body}\nPY_HEREDOC`;
 }
 
 /**
- * Build the script that writes (or re-writes) the managed block. If the
- * block already exists anywhere in the file, it is stripped first; the new
- * block is then inserted at the TOP of the file (with one blank line
- * separating it from user content). See SPLICE_HELPER for why top-only.
+ * Build the script that merges our provider into the codespace's
+ * config.toml. Idempotent — re-running produces the same file.
  */
 export function buildWriteCodexConfigScript(
   port: number,
   model: string,
 ): string {
-  const body = buildManagedBlockBody(port, model || null);
-  return buildSpliceScript(body);
+  const safeModel = safeModelLiteral(model);
+  // The `model` line is omitted when the caller passes an empty string
+  // — same convention as the local writer.
+  const setModelLine = safeModel ? `data['model'] = '${safeModel}'` : "";
+  const body = `
+import os
+${ATOMIC_DUMP_HELPER}
+${PARSE_HELPER}
+${TOML_EMITTER}
+p = os.path.expanduser('~/.codex/config.toml')
+data = _read_config(p)
+data['model_provider'] = '${PROVIDER_NAME}'
+${setModelLine}
+mps = data.get('model_providers') or {}
+mps['${PROVIDER_NAME}'] = {
+    'name': '${PROVIDER_DISPLAY}',
+    'base_url': 'http://127.0.0.1:${port}/codex/v1',
+    'wire_api': 'responses',
+    'request_timeout': 600,
+}
+data['model_providers'] = mps
+_atomic_dump_text(_toml_dump(data), p)
+`;
+  return pythonHeredoc(body);
 }
 
 /**
- * Build the script that updates only the model field. We re-derive the
- * port from whatever's currently in the managed block (so a model-only
- * change doesn't drop the base_url). If no block exists, we simply write
- * a model-only block and let the next full apply re-add the port.
+ * Build the script that sets only the `model` field. The provider
+ * config is left in place; if no provider is configured yet, the next
+ * write script invocation will fill it in.
  */
 export function buildUpdateCodexModelScript(model: string): string {
-  const safeModel = escapePython(model);
-  // Inline a tiny "extract port, then re-render" pre-step because the
-  // splice helper is dumb on purpose (it never reads the existing block).
-  return `python3 -c "
-import os, re
+  const safeModel = safeModelLiteral(model);
+  const body = `
+import os
 ${ATOMIC_DUMP_HELPER}
-${SPLICE_HELPER}
+${PARSE_HELPER}
+${TOML_EMITTER}
 p = os.path.expanduser('~/.codex/config.toml')
-try:
-    existing = open(p).read()
-except FileNotFoundError:
-    existing = ''
-m = re.search(r'base_url\\s*=\\s*\\\"http://127\\.0\\.0\\.1:(\\d+)/codex/v1\\\"', existing)
-port_line = ('base_url = \\\"http://127.0.0.1:%s/codex/v1\\\"' % m.group(1)) if m else ''
-body_lines = [
-    '# Managed by Agent Maestro Desktop. Do not edit manually --',
-    '# changes inside this block will be overwritten. Anything OUTSIDE',
-    '# the markers is preserved verbatim.',
-    'model_provider = \\\"${PROVIDER_NAME}\\\"',
-    'model = \\\"${safeModel}\\\"',
-    '',
-    '[model_providers.${PROVIDER_NAME}]',
-    'name = \\\"Agent Maestro Desktop\\\"',
-]
-if port_line:
-    body_lines.append(port_line)
-body_lines.extend([
-    'wire_api = \\\"responses\\\"',
-    'request_timeout = 600',
-    '__agent_maestro_managed = true',
-])
-body = '\\n'.join(body_lines)
-out = _splice_block(existing, body)
-_atomic_dump_text(out, p)
-"`;
+data = _read_config(p)
+data['model'] = '${safeModel}'
+_atomic_dump_text(_toml_dump(data), p)
+`;
+  return pythonHeredoc(body);
 }
 
 /**
- * Build the script that strips our managed block. Anything outside the
- * markers is left exactly as it was — that includes `[mcp_servers.*]`,
- * other `[model_providers.*]`, custom `[profiles.*]`, comments, etc.
+ * Build the script that strips our provider keys. Anything else in the
+ * file — other `[model_providers.*]`, user's `[mcp_servers.*]`, root-
+ * level options — is left in place. If the file ends up effectively
+ * empty, we leave a zero-byte file behind (so inotify watchers don't
+ * fire spuriously on a delete).
  */
 export function buildRemoveCodexConfigScript(): string {
-  return buildSpliceScript(null);
+  const body = `
+import os
+${ATOMIC_DUMP_HELPER}
+${PARSE_HELPER}
+${TOML_EMITTER}
+p = os.path.expanduser('~/.codex/config.toml')
+if not os.path.exists(p):
+    raise SystemExit(0)
+data = _read_config(p)
+if data.get('model_provider') == '${PROVIDER_NAME}':
+    del data['model_provider']
+mps = data.get('model_providers') or {}
+if '${PROVIDER_NAME}' in mps:
+    del mps['${PROVIDER_NAME}']
+    if not mps:
+        data.pop('model_providers', None)
+    else:
+        data['model_providers'] = mps
+if not data:
+    _atomic_dump_text('', p)
+else:
+    _atomic_dump_text(_toml_dump(data), p)
+`;
+  return pythonHeredoc(body);
 }
