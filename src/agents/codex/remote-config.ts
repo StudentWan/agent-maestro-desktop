@@ -77,35 +77,50 @@ function buildManagedBlockBody(port: number | null, model: string | null): strin
  * once per script (cheap; the script string is throwaway). Mirrors the
  * TypeScript splicer in `local-config.ts` so behaviour matches between
  * local writes and remote writes.
+ *
+ * The managed block is ALWAYS written at the TOP of the file. Codex's
+ * `model_provider` / `model` are TOML root-level keys; if they appear
+ * after any `[table]` header (e.g. user's `[mcp_servers.*]`) they get
+ * silently absorbed into that table. On every call we strip any existing
+ * block (wherever it is) and re-insert at the top — which also auto-
+ * migrates files written by older versions that appended at the bottom.
  */
 const SPLICE_HELPER = `
-def _splice_block(existing, body):
+def _strip_block(existing):
     begin = '${MARKER_BEGIN}'
     end = '${MARKER_END}'
     bi = existing.find(begin)
     ei = existing.find(end)
-    if bi != -1 and ei != -1 and ei > bi:
-        line_end = existing.find('\\n', ei)
-        if line_end == -1:
-            line_end = len(existing)
-        else:
-            line_end += 1
-        before = existing[:bi]
-        after = existing[line_end:]
-        if body is None:
-            trimmed = before[:-1] if before.endswith('\\n') else before
-            joined = trimmed + after
-            return '' if not joined.strip() else joined
-        sep = '' if (after == '' or after.startswith('\\n')) else '\\n'
-        return before + begin + '\\n' + body + '\\n' + end + sep + after
-    if body is None:
+    if bi == -1 or ei == -1 or ei <= bi:
         return existing
-    prefix = existing
-    if prefix and not prefix.endswith('\\n'):
-        prefix += '\\n'
-    if prefix and not prefix.endswith('\\n\\n'):
-        prefix += '\\n'
-    return prefix + begin + '\\n' + body + '\\n' + end + '\\n'
+    line_end = existing.find('\\n', ei)
+    if line_end == -1:
+        line_end = len(existing)
+    else:
+        line_end += 1
+    before = existing[:bi]
+    after = existing[line_end:]
+    # Collapse trailing newlines on 'before' to at most one so removing a
+    # mid-file block doesn't leave a doubled blank line behind.
+    if before:
+        i = len(before)
+        while i > 0 and before[i - 1] == '\\n':
+            i -= 1
+        before = before[:i] + '\\n'
+    return before + after
+
+def _splice_block(existing, body):
+    begin = '${MARKER_BEGIN}'
+    end = '${MARKER_END}'
+    stripped = _strip_block(existing)
+    if body is None:
+        return '' if not stripped.strip() else stripped
+    block = begin + '\\n' + body + '\\n' + end
+    # Drop leading newlines from user content so we control spacing.
+    remainder = stripped.lstrip('\\n')
+    if not remainder:
+        return block + '\\n'
+    return block + '\\n\\n' + remainder
 `;
 
 /**
@@ -145,8 +160,9 @@ else:
 
 /**
  * Build the script that writes (or re-writes) the managed block. If the
- * block already exists, it is preserved-then-replaced; if not, it is
- * appended after a blank line.
+ * block already exists anywhere in the file, it is stripped first; the new
+ * block is then inserted at the TOP of the file (with one blank line
+ * separating it from user content). See SPLICE_HELPER for why top-only.
  */
 export function buildWriteCodexConfigScript(
   port: number,
