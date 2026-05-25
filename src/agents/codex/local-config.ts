@@ -13,18 +13,27 @@ import type { AgentLocalConfigSnippet } from "../types";
  * Boundary contract: we MUST NOT clobber user-authored TOML. The user is
  * very likely to have `[mcp_servers.*]`, `[model_providers.openai]`, custom
  * `[profiles.*]`, etc. in this file already. We isolate every key we own
- * inside a marker-comment block:
+ * inside a marker-comment block, ALWAYS placed at the TOP of the file:
  *
- *   <existing user content>
  *   # >>> agent-maestro-managed >>>
- *   # ...lines we own...
+ *   # ...lines we own (root-level keys + our [model_providers.*] table)...
  *   # <<< agent-maestro-managed <<<
- *   <existing user content continues>
  *
- * Every read parses ONLY the marker block; every write splices it back in
- * without touching anything outside the markers. That sidesteps the need
- * for a real TOML round-tripping library (the only realistic Node.js
- * option, `smol-toml`, doesn't preserve comments / formatting).
+ *   <existing user content (their tables, comments, etc.)>
+ *
+ * Position matters: TOML root-level keys like `model_provider = "..."` MUST
+ * appear before any `[table]` header, otherwise they're parsed as a field of
+ * the most recent table. Our block contains root keys (`model_provider`,
+ * `model`) followed by a `[model_providers.agent-maestro]` table, so if the
+ * user has e.g. `[mcp_servers.*]` first, an appended block would have its
+ * root keys silently absorbed into `[mcp_servers.*]`. We always prepend.
+ *
+ * Every read parses ONLY the marker block; every write strips the existing
+ * block (wherever it is) and re-inserts it at the top. That sidesteps the
+ * need for a real TOML round-tripping library (the only realistic Node.js
+ * option, `smol-toml`, doesn't preserve comments / formatting), and also
+ * auto-migrates files that were previously written with the block at the
+ * bottom.
  *
  * What goes inside the marker block:
  *   model_provider = "agent-maestro"
@@ -94,63 +103,56 @@ function renderManagedBlock(state: ManagedBlockState): string {
 }
 
 /**
- * Splice (insert / replace / remove) the marker block in `existing`. If
- * `replacement` is null the block is removed entirely (along with one
- * trailing newline so we don't leave a blank line behind). Otherwise the
- * existing block is replaced, or a new one is appended.
+ * Splice (insert / replace / remove) the marker block in `existing`. The
+ * managed block is ALWAYS placed at the top of the file (see file header
+ * for why). On every call we strip any existing block (wherever it is) and
+ * either drop it (when `replacement` is null) or re-insert at the top —
+ * which also auto-migrates files written by older versions that appended.
  */
 function spliceManagedBlock(
   existing: string,
   replacement: string | null,
 ): string {
-  const beginIdx = existing.indexOf(MARKER_BEGIN);
-  const endIdx = existing.indexOf(MARKER_END);
+  const stripped = stripManagedBlock(existing);
 
-  if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
-    // Find the end of the line containing MARKER_END so we strip the whole
-    // closing line including its trailing newline (if present).
-    let endLineEnd = existing.indexOf("\n", endIdx);
-    if (endLineEnd === -1) endLineEnd = existing.length;
-    else endLineEnd += 1; // include the newline
-
-    const before = existing.slice(0, beginIdx);
-    const after = existing.slice(endLineEnd);
-
-    if (replacement === null) {
-      // Removing — trim a single trailing newline from `before` so we don't
-      // accumulate blank lines on repeated apply/remove cycles.
-      const trimmedBefore = before.endsWith("\n")
-        ? before.slice(0, before.length - 1)
-        : before;
-      const joined = trimmedBefore + after;
-      // If the result is just whitespace, normalise to empty.
-      return joined.trim().length === 0 ? "" : joined;
-    }
-
-    return (
-      before +
-      MARKER_BEGIN +
-      "\n" +
-      replacement +
-      "\n" +
-      MARKER_END +
-      (after.startsWith("\n") || after.length === 0 ? "" : "\n") +
-      after
-    );
+  if (replacement === null) {
+    return stripped.trim().length === 0 ? "" : stripped;
   }
 
-  // No marker block yet.
-  if (replacement === null) return existing;
+  const block = MARKER_BEGIN + "\n" + replacement + "\n" + MARKER_END;
+  // Drop any leading newlines from the user content so we control spacing.
+  const remainder = stripped.replace(/^\n+/, "");
 
-  // Append, separated by a blank line if the existing content doesn't end
-  // with one.
-  let prefix = existing;
-  if (prefix.length > 0 && !prefix.endsWith("\n")) prefix += "\n";
-  if (prefix.length > 0 && !prefix.endsWith("\n\n")) prefix += "\n";
+  if (remainder.length === 0) {
+    return block + "\n";
+  }
+  // One blank line between our block and user content.
+  return block + "\n\n" + remainder;
+}
 
-  return (
-    prefix + MARKER_BEGIN + "\n" + replacement + "\n" + MARKER_END + "\n"
-  );
+/**
+ * Remove the marker block (if present) and return the rest of the file.
+ * Collapses any blank-line buildup at the seam so repeated apply/remove
+ * cycles don't accumulate whitespace.
+ */
+function stripManagedBlock(existing: string): string {
+  const beginIdx = existing.indexOf(MARKER_BEGIN);
+  const endIdx = existing.indexOf(MARKER_END);
+  if (beginIdx === -1 || endIdx === -1 || endIdx <= beginIdx) {
+    return existing;
+  }
+  let endLineEnd = existing.indexOf("\n", endIdx);
+  if (endLineEnd === -1) endLineEnd = existing.length;
+  else endLineEnd += 1; // include the newline
+
+  const before = existing.slice(0, beginIdx);
+  const after = existing.slice(endLineEnd);
+
+  // Collapse trailing newlines on `before` to at most one, so removing a
+  // mid-file block doesn't leave a doubled blank line behind.
+  const trimmedBefore =
+    before.length > 0 ? before.replace(/\n+$/, "\n") : before;
+  return trimmedBefore + after;
 }
 
 function escapeTomlString(value: string): string {
@@ -262,6 +264,7 @@ export function getCodexConfigSnippet(
 /** Test-only helpers. Not part of the AgentPlugin contract. */
 export const __testing = {
   spliceManagedBlock,
+  stripManagedBlock,
   renderManagedBlock,
   extractModelFromBlock,
   extractPortFromBlock,
