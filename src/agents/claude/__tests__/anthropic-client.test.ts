@@ -15,6 +15,25 @@ function createFetchResponse(data: unknown, ok = true, status = 200) {
   }
 }
 
+function createModelsResponse(models: Array<{ id: string; efforts?: string[] }>) {
+  return createFetchResponse({
+    data: models.map((model) => ({
+      id: model.id,
+      name: model.id,
+      version: model.id,
+      capabilities: {
+        supports: {
+          reasoning_effort: model.efforts,
+        },
+      },
+    })),
+  })
+}
+
+function lastRequestBody() {
+  return JSON.parse(mockFetch.mock.calls.at(-1)?.[1].body)
+}
+
 describe('CopilotAnthropicClient', () => {
   let client: CopilotAnthropicClient
   let tokenManager: TokenManager
@@ -188,16 +207,18 @@ describe('CopilotAnthropicClient', () => {
     })
 
     it('adapts unsupported thinking and web search fields for Copilot Anthropic endpoint', async () => {
-      mockFetch.mockResolvedValueOnce(createFetchResponse({
-        id: 'msg_123',
-        type: 'message',
-        role: 'assistant',
-        model: 'claude-sonnet-4.6',
-        content: [],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      }))
+      mockFetch
+        .mockResolvedValueOnce(createModelsResponse([{ id: 'claude-sonnet-4.6', efforts: ['low', 'medium', 'high'] }]))
+        .mockResolvedValueOnce(createFetchResponse({
+          id: 'msg_123',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-sonnet-4.6',
+          content: [],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }))
 
       await client.messages({
         model: 'claude-sonnet-4-6',
@@ -211,8 +232,7 @@ describe('CopilotAnthropicClient', () => {
         max_tokens: 100,
       })
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const body = JSON.parse(fetchCall[1].body)
+      const body = lastRequestBody()
       expect(body.thinking).toEqual({ type: 'adaptive' })
       expect(body.output_config).toEqual({ effort: 'high' })
       expect(body.tools).toHaveLength(1)
@@ -252,16 +272,18 @@ describe('CopilotAnthropicClient', () => {
       ['claude-sonnet-4.5', 'claude-sonnet-4.5'],
       ['claude-opus-4.5', 'claude-opus-4.5'],
     ])('strips reasoning effort for %s because Copilot does not support it', async (requestedModel, copilotModel) => {
-      mockFetch.mockResolvedValueOnce(createFetchResponse({
-        id: 'msg_123',
-        type: 'message',
-        role: 'assistant',
-        model: copilotModel,
-        content: [],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      }))
+      mockFetch
+        .mockResolvedValueOnce(createModelsResponse([{ id: copilotModel }]))
+        .mockResolvedValueOnce(createFetchResponse({
+          id: 'msg_123',
+          type: 'message',
+          role: 'assistant',
+          model: copilotModel,
+          content: [],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }))
 
       await client.messages({
         model: requestedModel,
@@ -272,8 +294,7 @@ describe('CopilotAnthropicClient', () => {
         max_tokens: 100,
       })
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const body = JSON.parse(fetchCall[1].body)
+      const body = lastRequestBody()
       expect(body.model).toBe(copilotModel)
       expect(body.thinking).toBeUndefined()
       expect(body.output_config).toBeUndefined()
@@ -285,17 +306,20 @@ describe('CopilotAnthropicClient', () => {
       ['claude-opus-4.8', 'medium'],
       ['claude-opus-4.7-high', 'high'],
       ['claude-opus-4.7-xhigh', 'xhigh'],
+      ['claude-opus-5.0', 'medium'],
     ])('normalizes reasoning effort for %s', async (requestedModel, expectedEffort) => {
-      mockFetch.mockResolvedValueOnce(createFetchResponse({
-        id: 'msg_123',
-        type: 'message',
-        role: 'assistant',
-        model: requestedModel,
-        content: [],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      }))
+      mockFetch
+        .mockResolvedValueOnce(createModelsResponse([{ id: requestedModel, efforts: [expectedEffort] }]))
+        .mockResolvedValueOnce(createFetchResponse({
+          id: 'msg_123',
+          type: 'message',
+          role: 'assistant',
+          model: requestedModel,
+          content: [],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }))
 
       await client.messages({
         model: requestedModel,
@@ -305,22 +329,23 @@ describe('CopilotAnthropicClient', () => {
         max_tokens: 100,
       })
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const body = JSON.parse(fetchCall[1].body)
+      const body = lastRequestBody()
       expect(body.output_config).toEqual({ effort: expectedEffort })
     })
 
     it('infers xhigh effort from Claude Code xhigh thinking budget for Opus 4.7 1M', async () => {
-      mockFetch.mockResolvedValueOnce(createFetchResponse({
-        id: 'msg_123',
-        type: 'message',
-        role: 'assistant',
-        model: 'claude-opus-4.7-1m-internal',
-        content: [],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      }))
+      mockFetch
+        .mockResolvedValueOnce(createModelsResponse([{ id: 'claude-opus-4.7-1m-internal', efforts: ['low', 'medium', 'high', 'xhigh'] }]))
+        .mockResolvedValueOnce(createFetchResponse({
+          id: 'msg_123',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4.7-1m-internal',
+          content: [],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }))
 
       await client.messages({
         model: 'claude-opus-4.7-1m-internal',
@@ -329,8 +354,7 @@ describe('CopilotAnthropicClient', () => {
         max_tokens: 100,
       })
 
-      const fetchCall = mockFetch.mock.calls[0]
-      const body = JSON.parse(fetchCall[1].body)
+      const body = lastRequestBody()
       expect(body.output_config).toEqual({ effort: 'xhigh' })
     })
 

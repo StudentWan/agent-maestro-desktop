@@ -1,8 +1,25 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { registerModelsRoutes } from '../routes/models'
+import type { TokenManager } from '../../../copilot/token-manager'
+
+const mockFetch = vi.fn()
+vi.stubGlobal('fetch', mockFetch)
+
+function createFetchResponse(data: unknown, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
+  }
+}
 
 describe('models route', () => {
+  beforeEach(() => {
+    mockFetch.mockReset()
+  })
+
   it('returns a list of Claude models', async () => {
     const app = new Hono()
     registerModelsRoutes(app)
@@ -55,5 +72,30 @@ describe('models route', () => {
       expect(model.created).toBeDefined()
       expect(model.owned_by).toBe('anthropic')
     }
+  })
+
+  it('uses authenticated Copilot model discovery when available', async () => {
+    const app = new Hono()
+    const tokenManager = {
+      getTokenBundle: vi.fn().mockResolvedValue({
+        token: 'jwt-copilot-token',
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+        baseUrl: 'https://api.individual.githubcopilot.com',
+      }),
+    } as unknown as TokenManager
+    registerModelsRoutes(app, () => tokenManager)
+
+    mockFetch.mockResolvedValueOnce(createFetchResponse({
+      data: [
+        { id: 'claude-opus-5.0', name: 'Claude Opus 5.0', version: 'claude-opus-5.0' },
+        { id: 'gpt-5.5', name: 'GPT 5.5', version: 'gpt-5.5' },
+      ],
+    }))
+
+    const res = await app.request('/v1/models')
+    const body = await res.json()
+    const ids = body.data.map((m: any) => m.id)
+
+    expect(ids).toEqual(['claude-opus-5.0'])
   })
 })
