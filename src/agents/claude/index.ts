@@ -52,7 +52,7 @@ export const claudePlugin: AgentPlugin = {
       };
     });
     registerCountTokensRoute(app);
-    registerModelsRoutes(app);
+    registerModelsRoutes(app, () => getClient()?.getTokenManager() ?? null);
   },
 
   async fetchModels(tokenManager: TokenManager): Promise<AgentModelInfo[]> {

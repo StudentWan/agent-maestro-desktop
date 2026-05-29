@@ -283,10 +283,6 @@ function resolveLoggedThinkingLevel(request: AnthropicRequest): string | undefin
   if (model.includes("opus-4.7-high")) {
     return "high";
   }
-  if (model === "claude-opus-4.8" || model === "claude-opus-4-8") {
-    return "medium";
-  }
-
   if (!request.thinking) {
     return undefined;
   }
