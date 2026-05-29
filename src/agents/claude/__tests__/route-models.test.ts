@@ -16,7 +16,7 @@ describe('models route', () => {
     expect(body.data.length).toBeGreaterThanOrEqual(3)
   })
 
-  it('includes claude-opus-4-6 model', async () => {
+  it('includes current Claude model ids', async () => {
     const app = new Hono()
     registerModelsRoutes(app)
 
@@ -24,6 +24,7 @@ describe('models route', () => {
     const body = await res.json()
     const ids = body.data.map((m: any) => m.id)
 
+    expect(ids).toContain('claude-opus-4.8')
     expect(ids).toContain('claude-opus-4-6')
     expect(ids).toContain('claude-sonnet-4-6')
     expect(ids).toContain('claude-haiku-4-5-20251001')
