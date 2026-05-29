@@ -18,11 +18,25 @@ import {
 } from "./anthropic-headers";
 import { applyCopilotPromptCache } from "./prompt-cache";
 import { mapModelName } from "./converter/model-mapper";
+import { fetchCopilotModelEntries } from "./models";
+import type { CopilotToken } from "../../copilot/types";
 import type {
   AnthropicOutputConfig,
   AnthropicRequest,
   AnthropicResponse,
 } from "./converter/types";
+
+type ReasoningEffort = NonNullable<AnthropicOutputConfig["effort"]>;
+
+const REASONING_EFFORT_ORDER: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const REASONING_EFFORT_CATALOG_TTL_MS = 5 * 60 * 1000;
+const REASONING_EFFORT_FAILURE_TTL_MS = 60 * 1000;
+
+interface ReasoningEffortCatalog {
+  baseUrl: string;
+  expiresAt: number;
+  effortsByModel: Map<string, ReasoningEffort[]>;
+}
 
 function resolveAnthropicMessagesUrl(baseUrl: string): string {
   const normalized = baseUrl.trim().replace(/\/+$/, "");
@@ -56,13 +70,18 @@ function prepareCopilotAnthropicRequest(
   request: AnthropicRequest,
   options: CopilotAnthropicHeaderOptions,
   stream: boolean,
+  supportedReasoningEfforts?: ReasoningEffort[],
+  resolvedModel = resolveCopilotClaudeModel(request.model, options),
 ): AnthropicRequest {
   const compatibleRequest = stripUnsupportedCopilotTools({
     ...request,
-    model: resolveCopilotClaudeModel(request.model, options),
+    model: resolvedModel,
     stream,
   });
-  const prepared = normalizeReasoningForCopilot(adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest)));
+  const prepared = normalizeReasoningForCopilot(
+    adaptThinkingForCopilot(applyCopilotPromptCache(compatibleRequest)),
+    supportedReasoningEfforts,
+  );
   // Copilot never accepts context_management — strip unconditionally.
   if ("context_management" in prepared) {
     const { context_management: _, ...rest } = prepared;
@@ -124,12 +143,19 @@ function adaptThinkingForCopilot(request: AnthropicRequest): AnthropicRequest {
   };
 }
 
-function normalizeReasoningForCopilot(request: AnthropicRequest): AnthropicRequest {
+function normalizeReasoningForCopilot(
+  request: AnthropicRequest,
+  supportedReasoningEfforts?: ReasoningEffort[],
+): AnthropicRequest {
   if (!request.thinking && !request.output_config?.effort) {
     return request;
   }
 
-  const effort = resolveCopilotReasoningEffort(request.model, request.output_config?.effort);
+  const effort = resolveCopilotReasoningEffort(
+    request.model,
+    request.output_config?.effort,
+    supportedReasoningEfforts,
+  );
   if (effort) {
     return {
       ...request,
@@ -157,7 +183,12 @@ function normalizeReasoningForCopilot(request: AnthropicRequest): AnthropicReque
 function resolveCopilotReasoningEffort(
   model: string,
   requestedEffort: AnthropicOutputConfig["effort"],
+  supportedReasoningEfforts?: ReasoningEffort[],
 ): AnthropicOutputConfig["effort"] | undefined {
+  if (supportedReasoningEfforts) {
+    return chooseSupportedReasoningEffort(requestedEffort, supportedReasoningEfforts);
+  }
+
   const normalized = model.toLowerCase();
   if (normalized.includes("haiku") || normalized.includes("sonnet-4.5") || normalized.includes("opus-4.5")) {
     return undefined;
@@ -168,10 +199,58 @@ function resolveCopilotReasoningEffort(
   if (normalized.includes("opus-4.7-high")) {
     return "high";
   }
-  if (normalized === "claude-opus-4.7" || normalized === "claude-opus-4.8") {
+  if (normalized === "claude-opus-4.7") {
     return "medium";
   }
   return requestedEffort;
+}
+
+function chooseSupportedReasoningEffort(
+  requestedEffort: AnthropicOutputConfig["effort"],
+  supportedReasoningEfforts: ReasoningEffort[],
+): ReasoningEffort | undefined {
+  if (supportedReasoningEfforts.length === 0) {
+    return undefined;
+  }
+
+  const requested = requestedEffort ?? "medium";
+  if (supportedReasoningEfforts.includes(requested)) {
+    return requested;
+  }
+
+  const requestedRank = REASONING_EFFORT_ORDER.indexOf(requested);
+  const targetRank = requestedRank >= 0 ? requestedRank : REASONING_EFFORT_ORDER.indexOf("medium");
+  let bestEffort = supportedReasoningEfforts[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestRank = -1;
+
+  for (const effort of supportedReasoningEfforts) {
+    const rank = REASONING_EFFORT_ORDER.indexOf(effort);
+    if (rank < 0) {
+      continue;
+    }
+    const distance = Math.abs(rank - targetRank);
+    if (distance < bestDistance || (distance === bestDistance && rank > bestRank)) {
+      bestEffort = effort;
+      bestDistance = distance;
+      bestRank = rank;
+    }
+  }
+
+  return bestEffort;
+}
+
+function normalizeSupportedReasoningEfforts(efforts: string[] | undefined): ReasoningEffort[] {
+  if (!efforts) {
+    return [];
+  }
+  return efforts.filter((effort): effort is ReasoningEffort =>
+    REASONING_EFFORT_ORDER.includes(effort as ReasoningEffort),
+  );
+}
+
+function needsReasoningNormalization(request: AnthropicRequest): boolean {
+  return Boolean(request.thinking || request.output_config?.effort);
 }
 
 function resolveThinkingEffort(
@@ -204,6 +283,10 @@ function supportsXHighThinkingBudget(model: string): boolean {
  * the Claude plugin so the generic Copilot client stays Anthropic-free.
  */
 export class CopilotAnthropicClient {
+  private reasoningEffortCatalog: ReasoningEffortCatalog | null = null;
+  private reasoningEffortCatalogPromise: { baseUrl: string; promise: Promise<ReasoningEffortCatalog> } | null = null;
+  private reasoningEffortCatalogFailureExpiresAt = 0;
+
   constructor(private readonly tokenManager: TokenManager) {}
 
   /**
@@ -215,7 +298,11 @@ export class CopilotAnthropicClient {
   ): Promise<AnthropicResponse> {
     const tokenBundle = await this.tokenManager.getTokenBundle();
     const headers = buildCopilotAnthropicHeaders(tokenBundle.token, request, options);
-    const body = prepareCopilotAnthropicRequest(request, options, false);
+    const resolvedModel = resolveCopilotClaudeModel(request.model, options);
+    const supportedReasoningEfforts = needsReasoningNormalization(request)
+      ? await this.getSupportedReasoningEfforts(tokenBundle, resolvedModel)
+      : undefined;
+    const body = prepareCopilotAnthropicRequest(request, options, false, supportedReasoningEfforts, resolvedModel);
 
     const response = await fetch(resolveAnthropicMessagesUrl(tokenBundle.baseUrl), {
       method: "POST",
@@ -241,7 +328,11 @@ export class CopilotAnthropicClient {
   ): Promise<Response> {
     const tokenBundle = await this.tokenManager.getTokenBundle();
     const headers = buildCopilotAnthropicHeaders(tokenBundle.token, request, options);
-    const body = prepareCopilotAnthropicRequest(request, options, true);
+    const resolvedModel = resolveCopilotClaudeModel(request.model, options);
+    const supportedReasoningEfforts = needsReasoningNormalization(request)
+      ? await this.getSupportedReasoningEfforts(tokenBundle, resolvedModel)
+      : undefined;
+    const body = prepareCopilotAnthropicRequest(request, options, true, supportedReasoningEfforts, resolvedModel);
 
     const response = await fetch(resolveAnthropicMessagesUrl(tokenBundle.baseUrl), {
       method: "POST",
@@ -255,5 +346,68 @@ export class CopilotAnthropicClient {
     }
 
     return response;
+  }
+
+  private async getSupportedReasoningEfforts(
+    tokenBundle: Pick<CopilotToken, "token" | "baseUrl">,
+    model: string,
+  ): Promise<ReasoningEffort[] | undefined> {
+    if (Date.now() < this.reasoningEffortCatalogFailureExpiresAt) {
+      return undefined;
+    }
+
+    try {
+      const catalog = await this.getReasoningEffortCatalog(tokenBundle);
+      return catalog.effortsByModel.get(model.toLowerCase());
+    } catch (error) {
+      this.reasoningEffortCatalogFailureExpiresAt = Date.now() + REASONING_EFFORT_FAILURE_TTL_MS;
+      console.warn("[CopilotAnthropicClient] Failed to fetch Copilot model capabilities:", error);
+      return undefined;
+    }
+  }
+
+  private async getReasoningEffortCatalog(
+    tokenBundle: Pick<CopilotToken, "token" | "baseUrl">,
+  ): Promise<ReasoningEffortCatalog> {
+    const baseUrl = tokenBundle.baseUrl.trim().replace(/\/+$/, "");
+    const now = Date.now();
+
+    if (
+      this.reasoningEffortCatalog &&
+      this.reasoningEffortCatalog.baseUrl === baseUrl &&
+      this.reasoningEffortCatalog.expiresAt > now
+    ) {
+      return this.reasoningEffortCatalog;
+    }
+
+    if (this.reasoningEffortCatalogPromise?.baseUrl === baseUrl) {
+      return this.reasoningEffortCatalogPromise.promise;
+    }
+
+    const promise = fetchCopilotModelEntries(tokenBundle).then((entries) => {
+      const effortsByModel = new Map<string, ReasoningEffort[]>();
+      for (const entry of entries) {
+        effortsByModel.set(
+          entry.id.toLowerCase(),
+          normalizeSupportedReasoningEfforts(entry.capabilities?.supports?.reasoning_effort),
+        );
+      }
+      const catalog: ReasoningEffortCatalog = {
+        baseUrl,
+        expiresAt: Date.now() + REASONING_EFFORT_CATALOG_TTL_MS,
+        effortsByModel,
+      };
+      this.reasoningEffortCatalog = catalog;
+      return catalog;
+    });
+
+    this.reasoningEffortCatalogPromise = { baseUrl, promise };
+    try {
+      return await promise;
+    } finally {
+      if (this.reasoningEffortCatalogPromise?.promise === promise) {
+        this.reasoningEffortCatalogPromise = null;
+      }
+    }
   }
 }
