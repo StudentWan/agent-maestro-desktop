@@ -48,6 +48,57 @@ interface CodexConfig {
   [key: string]: unknown;
 }
 
+function isTomlTable(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function putManagedProviderFirst(
+  modelProviders: Record<string, Record<string, unknown>>,
+): Record<string, Record<string, unknown>> {
+  if (!(PROVIDER_NAME in modelProviders)) {
+    return modelProviders;
+  }
+
+  const { [PROVIDER_NAME]: managedProvider, ...otherProviders } =
+    modelProviders;
+  return {
+    [PROVIDER_NAME]: managedProvider,
+    ...otherProviders,
+  };
+}
+
+/**
+ * Canonicalize the table order before stringifying. Standard TOML parsers do
+ * not care where a table appears, but some Codex app/CLI combinations have
+ * behaved order-sensitively when a user config has many tables. Keep the
+ * provider block near the root keys, matching the layout users found reliable.
+ */
+function orderForStringify(config: CodexConfig): CodexConfig {
+  const ordered: CodexConfig = {};
+
+  for (const [key, value] of Object.entries(config)) {
+    if (key !== "model_providers" && !isTomlTable(value)) {
+      ordered[key] = value;
+    }
+  }
+
+  if (config.model_providers) {
+    ordered.model_providers = putManagedProviderFirst(config.model_providers);
+  }
+
+  for (const [key, value] of Object.entries(config)) {
+    if (key !== "model_providers" && isTomlTable(value)) {
+      ordered[key] = value;
+    }
+  }
+
+  return ordered;
+}
+
+function stringifyCodexConfig(config: CodexConfig): string {
+  return stringify(orderForStringify(config));
+}
+
 async function readFileOrEmpty(filePath: string): Promise<string> {
   try {
     return await fs.readFile(filePath, "utf-8");
@@ -140,7 +191,7 @@ export async function applyCodexConfig(port: number): Promise<void> {
   const raw = await readFileOrEmpty(CONFIG_PATH);
   const existing = parseExisting(raw);
   const merged = mergeProvider(existing, port, null);
-  await writeFileAtomic(CONFIG_PATH, stringify(merged));
+  await writeFileAtomic(CONFIG_PATH, stringifyCodexConfig(merged));
   console.log(
     `[CodexConfig] Applied — base_url=http://127.0.0.1:${port}/codex/v1`,
   );
@@ -157,7 +208,7 @@ export async function removeCodexConfig(_port: number): Promise<void> {
   if (next === null) {
     await writeFileAtomic(CONFIG_PATH, "");
   } else {
-    await writeFileAtomic(CONFIG_PATH, stringify(next));
+    await writeFileAtomic(CONFIG_PATH, stringifyCodexConfig(next));
   }
   console.log("[CodexConfig] Removed agent-maestro provider entries");
 }
@@ -172,7 +223,7 @@ export async function writeModelToCodexConfig(modelId: string): Promise<void> {
   const raw = await readFileOrEmpty(CONFIG_PATH);
   const existing = parseExisting(raw);
   existing.model = modelId;
-  await writeFileAtomic(CONFIG_PATH, stringify(existing));
+  await writeFileAtomic(CONFIG_PATH, stringifyCodexConfig(existing));
   console.log(`[CodexConfig] Model set to: ${modelId}`);
 }
 
@@ -191,7 +242,7 @@ export function getCodexConfigSnippet(
     envVars: {},
     file: {
       path: "~/.codex/config.toml",
-      content: stringify(snippet),
+      content: stringifyCodexConfig(snippet),
       language: "toml",
     },
   };
@@ -202,6 +253,7 @@ export const __testing = {
   parseExisting,
   mergeProvider,
   stripProvider,
+  stringifyCodexConfig,
   PROVIDER_NAME,
   CONFIG_PATH,
 };

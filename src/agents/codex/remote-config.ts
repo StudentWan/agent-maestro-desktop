@@ -95,6 +95,17 @@ def _toml_value(v):
 
 def _toml_dump(data):
     lines = []
+    def reorder_tables(prefix, tables):
+        if prefix == '':
+            front = [item for item in tables if item[0] == 'model_providers']
+            rest = [item for item in tables if item[0] != 'model_providers']
+            return front + rest
+        if prefix == 'model_providers':
+            front = [item for item in tables if item[0] == 'agent-maestro']
+            rest = [item for item in tables if item[0] != 'agent-maestro']
+            return front + rest
+        return tables
+
     def emit(d, prefix):
         scalars = []
         tables = []
@@ -105,6 +116,7 @@ def _toml_dump(data):
                 scalars.append((k, v))
         for k, v in scalars:
             lines.append(_toml_key(k) + ' = ' + _toml_value(v))
+        tables = reorder_tables(prefix, tables)
         for k, v in tables:
             path = (prefix + '.' + _toml_key(k)) if prefix else _toml_key(k)
             has_own_scalars = any(not (isinstance(vv, dict) and vv) for vv in v.values())
