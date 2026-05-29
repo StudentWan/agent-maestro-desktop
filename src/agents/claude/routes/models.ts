@@ -7,6 +7,12 @@ export function registerModelsRoutes(app: Hono) {
   app.get("/v1/models", (c) => {
     const models = [
       {
+        id: "claude-opus-4.8",
+        object: "model",
+        created: Date.now(),
+        owned_by: "anthropic",
+      },
+      {
         id: "claude-opus-4-6",
         object: "model",
         created: Date.now(),

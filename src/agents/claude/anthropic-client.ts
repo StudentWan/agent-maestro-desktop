@@ -168,7 +168,7 @@ function resolveCopilotReasoningEffort(
   if (normalized.includes("opus-4.7-high")) {
     return "high";
   }
-  if (normalized === "claude-opus-4.7") {
+  if (normalized === "claude-opus-4.7" || normalized === "claude-opus-4.8") {
     return "medium";
   }
   return requestedEffort;

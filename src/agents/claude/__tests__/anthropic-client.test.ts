@@ -282,6 +282,7 @@ describe('CopilotAnthropicClient', () => {
 
     it.each([
       ['claude-opus-4.7', 'medium'],
+      ['claude-opus-4.8', 'medium'],
       ['claude-opus-4.7-high', 'high'],
       ['claude-opus-4.7-xhigh', 'xhigh'],
     ])('normalizes reasoning effort for %s', async (requestedModel, expectedEffort) => {
