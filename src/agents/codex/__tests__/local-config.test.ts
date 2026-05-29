@@ -116,9 +116,8 @@ command = "node"
 args = ["server.js"]
 env = { NODE_ENV = "dev" }
 `;
-    const { stringify } = require("smol-toml") as typeof import("smol-toml");
     const merged = mergeProvider(parseExisting(userToml), 23337, "gpt-5");
-    const reparsed = parse(stringify(merged));
+    const reparsed = parse(__testing.stringifyCodexConfig(merged));
     // Roundtrip preserves both our keys and the user's nested env table.
     expect(reparsed.model_provider).toBe(PROVIDER_NAME);
     expect(
@@ -129,5 +128,49 @@ env = { NODE_ENV = "dev" }
       (reparsed.mcp_servers as Record<string, Record<string, unknown>>).local
         .env,
     ).toEqual({ NODE_ENV: "dev" });
+  });
+
+  it("emits the managed provider block before other user tables", () => {
+    const userToml = `
+windows_wsl_setup_acknowledged = true
+model = "gpt-5.5"
+model_provider = "agent-maestro"
+model_context_window = 271790
+
+[features]
+experimental_windows_sandbox = true
+multi_agent = true
+
+[model_providers.aoai-1]
+base_url = "https://example.openai.azure.com/openai"
+env_key = "AZURE_OPENAI_API_KEY"
+name = "AzureOpenAI"
+wire_api = "responses"
+
+[model_providers.aoai-1.query_params]
+api-version = "2025-04-01-preview"
+
+[profiles.gpt5-5]
+model = "gpt-5.5"
+model_provider = "aoai-1"
+`;
+    const merged = mergeProvider(parseExisting(userToml), 23337, "gpt-5.5");
+    const output = __testing.stringifyCodexConfig(merged);
+    const reparsed = parse(output) as {
+      model_provider?: string;
+      model_providers?: Record<string, unknown>;
+    };
+
+    expect(reparsed.model_provider).toBe(PROVIDER_NAME);
+    expect(reparsed.model_providers?.[PROVIDER_NAME]).toBeDefined();
+    expect(output.indexOf("[model_providers.agent-maestro]")).toBeGreaterThan(
+      output.indexOf("model_context_window"),
+    );
+    expect(output.indexOf("[model_providers.agent-maestro]")).toBeLessThan(
+      output.indexOf("[features]"),
+    );
+    expect(output.indexOf("[model_providers.agent-maestro]")).toBeLessThan(
+      output.indexOf("[model_providers.aoai-1]"),
+    );
   });
 });
