@@ -1,5 +1,5 @@
 import type { Context, Next } from "hono";
-import type { RequestLogEntry } from "../../shared/types";
+import type { RequestLogEntry, UpstreamErrorInfo } from "../../shared/types";
 
 type LogCallback = (entry: RequestLogEntry) => void;
 
@@ -18,6 +18,7 @@ declare module "hono" {
     loggedOutputTokens: number;
     loggedThinkingLevel: string;
     loggedError: string;
+    loggedUpstreamError: UpstreamErrorInfo;
   }
 }
 
@@ -34,6 +35,7 @@ let requestCounter = 0;
  *   c.set("loggedInputTokens", 123);
  *   c.set("loggedOutputTokens", 456);
  *   c.set("loggedError", "optional error message");
+ *   c.set("loggedUpstreamError", { status: 502, body: "<raw body>" });
  *
  * Why context-stash instead of re-reading the body? The route already calls
  * `await c.req.json()` which consumes the request stream — it can't be read
@@ -61,6 +63,7 @@ export function createRequestLogger(onLog: LogCallback) {
     const outputTokens = c.get("loggedOutputTokens");
     const thinkingLevel = c.get("loggedThinkingLevel");
     const error = c.get("loggedError");
+    const upstreamError = c.get("loggedUpstreamError");
 
     const entry: RequestLogEntry = {
       id,
@@ -75,6 +78,7 @@ export function createRequestLogger(onLog: LogCallback) {
       outputTokens,
       thinkingLevel,
       error,
+      upstreamError,
     };
 
     onLog(entry);

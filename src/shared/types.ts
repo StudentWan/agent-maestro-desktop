@@ -55,6 +55,18 @@ export interface TokenInfo {
 }
 
 // Request log
+export interface UpstreamErrorInfo {
+  /** HTTP status the upstream Copilot endpoint returned (e.g. 502). */
+  status: number;
+  /**
+   * Raw response body from the upstream. Truncated by
+   * `truncateUpstreamBody` in `src/copilot/upstream-error.ts` before it
+   * crosses the IPC boundary so we never ship multi-MB HTML error pages
+   * to the renderer.
+   */
+  body: string;
+}
+
 export interface RequestLogEntry {
   id: string;
   timestamp: number;
@@ -67,7 +79,15 @@ export interface RequestLogEntry {
   outputTokens?: number;
   thinkingLevel?: string;
   stream: boolean;
+  /** Short, human-friendly error message (exception .message or similar). */
   error?: string;
+  /**
+   * Present only when the failure was a non-OK HTTP response from the
+   * upstream Copilot API. The renderer surfaces `body` verbatim in the
+   * expandable row so users can diagnose 502s / context-exceeded / auth
+   * failures without scraping logs.
+   */
+  upstreamError?: UpstreamErrorInfo;
 }
 
 // Config — generic top-level

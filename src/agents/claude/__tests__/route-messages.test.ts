@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { registerMessagesRoute, type ClaudeMessagesServices } from '../routes/messages'
 import { createRequestLogger } from '../../../proxy/middleware/request-logger'
+import { CopilotUpstreamError } from '../../../copilot/upstream-error'
 
 function makeServices(overrides: Partial<{
   anthropicMessages: ReturnType<typeof vi.fn>
@@ -201,5 +202,37 @@ describe('claude messages route', () => {
     const body = await res.json()
     expect(body.content[0].text).toBe('Hello from GPT!')
     expect(chatCompletion).toHaveBeenCalled()
+  })
+
+  it('surfaces the upstream response body on the request log entry when copilot returns non-200', async () => {
+    const logCallback = vi.fn()
+    const upstreamBody = '{"error":{"type":"upstream_unavailable","message":"bad gateway"}}'
+    const anthropicMessages = vi.fn().mockRejectedValue(
+      new CopilotUpstreamError(
+        'Copilot Anthropic Messages error (502)',
+        502,
+        upstreamBody,
+      ),
+    )
+
+    const app = new Hono()
+    app.use('*', createRequestLogger(logCallback))
+    registerMessagesRoute(app, () => makeServices({ anthropicMessages }))
+
+    const res = await app.request('/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100,
+      }),
+    })
+
+    expect(res.status).toBe(502)
+    expect(logCallback).toHaveBeenCalledTimes(1)
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.upstreamError).toEqual({ status: 502, body: upstreamBody })
+    expect(entry.error).toContain('Copilot Anthropic Messages error (502)')
   })
 })

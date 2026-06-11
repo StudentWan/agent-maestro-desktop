@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
 import type { CopilotResponsesClient } from "../responses-client";
+import { CopilotUpstreamError } from "../../../copilot/upstream-error";
 import type { ResponsesRequest } from "../converter/types";
 
 /**
@@ -165,6 +166,9 @@ export function registerResponsesRoute(
       const message = error instanceof Error ? error.message : String(error);
       console.error("[Codex Responses Route] Error:", message);
       c.set("loggedError", message);
+      if (error instanceof CopilotUpstreamError) {
+        c.set("loggedUpstreamError", { status: error.status, body: error.body });
+      }
 
       if (isStream) {
         // Codex CLI is mid-SSE; emit a minimal `response.failed` event so

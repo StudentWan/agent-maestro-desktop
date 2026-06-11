@@ -151,4 +151,24 @@ describe('request-logger middleware', () => {
     const entry = logCallback.mock.calls[0][0]
     expect(entry.model).toBe('GET /health')
   })
+
+  it('forwards loggedUpstreamError onto the log entry', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.post('/v1/messages', (c) => {
+      c.set('loggedModel', 'claude-sonnet-4-6')
+      c.set('loggedError', 'Copilot Anthropic Messages error (502): bad gateway')
+      c.set('loggedUpstreamError', { status: 502, body: 'bad gateway' })
+      return c.json({ error: 'upstream failed' }, 502)
+    })
+
+    await app.request('/v1/messages', { method: 'POST' })
+
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.status).toBe(502)
+    expect(entry.upstreamError).toEqual({ status: 502, body: 'bad gateway' })
+    expect(entry.error).toBe('Copilot Anthropic Messages error (502): bad gateway')
+  })
 })

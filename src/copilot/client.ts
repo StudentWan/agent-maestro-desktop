@@ -5,6 +5,7 @@ import {
 } from "./headers";
 import type { CopilotCompletionRequest, CopilotCompletionResponse } from "./types";
 import { TokenManager } from "./token-manager";
+import { CopilotUpstreamError, truncateUpstreamBody } from "./upstream-error";
 
 /**
  * HTTP client for the Copilot Chat (`/chat/completions`) API.
@@ -42,7 +43,11 @@ export class CopilotClient {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Copilot API error (${response.status}): ${body}`);
+      throw new CopilotUpstreamError(
+        `Copilot API error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(body),
+      );
     }
 
     return response.json() as Promise<CopilotCompletionResponse>;
@@ -63,7 +68,11 @@ export class CopilotClient {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Copilot API stream error (${response.status}): ${body}`);
+      throw new CopilotUpstreamError(
+        `Copilot API stream error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(body),
+      );
     }
 
     return response;
