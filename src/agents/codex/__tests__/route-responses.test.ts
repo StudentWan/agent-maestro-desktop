@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { registerResponsesRoute } from "../routes/responses";
+import { createRequestLogger } from "../../../proxy/middleware/request-logger";
+import { CopilotUpstreamError } from "../../../copilot/upstream-error";
 import type { CopilotResponsesClient } from "../responses-client";
 
 function makeClient(overrides: Partial<{
@@ -161,5 +163,38 @@ describe("codex responses route", () => {
     expect(text).toContain("event: response.failed");
     expect(text).toContain("server_error");
     expect(text).toContain("boom");
+  });
+
+  it("surfaces upstream response body on the request log entry when copilot returns non-200", async () => {
+    const logCallback = vi.fn();
+    const upstreamBody = '{"error":{"code":"upstream_unavailable"}}';
+    const createResponse = vi
+      .fn()
+      .mockRejectedValue(
+        new CopilotUpstreamError(
+          "Copilot Responses API error (502)",
+          502,
+          upstreamBody,
+        ),
+      );
+
+    const app = new Hono();
+    app.use("*", createRequestLogger(logCallback));
+    registerResponsesRoute(app, () => makeClient({ createResponse }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        input: "hi",
+      }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(logCallback).toHaveBeenCalledTimes(1);
+    const entry = logCallback.mock.calls[0][0];
+    expect(entry.upstreamError).toEqual({ status: 502, body: upstreamBody });
+    expect(entry.error).toContain("Copilot Responses API error (502)");
   });
 });

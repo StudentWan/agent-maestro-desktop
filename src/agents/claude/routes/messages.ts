@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import { stream } from "hono/streaming";
 import type { CopilotClient } from "../../../copilot/client";
 import type { CopilotAnthropicClient } from "../anthropic-client";
+import { CopilotUpstreamError } from "../../../copilot/upstream-error";
 import { convertAnthropicToOpenAI } from "../converter/anthropic-to-openai";
 import { convertOpenAIToAnthropic } from "../converter/openai-to-anthropic";
 import { createStreamTransformer } from "../converter/stream-transformer";
@@ -171,6 +172,9 @@ export function registerMessagesRoute(
       const message = error instanceof Error ? error.message : String(error);
       console.error("[Messages Route] Error:", message);
       c.set("loggedError", message);
+      if (error instanceof CopilotUpstreamError) {
+        c.set("loggedUpstreamError", { status: error.status, body: error.body });
+      }
 
       // Detect context window / context length exceeded errors from Copilot
       const isContextExceeded =

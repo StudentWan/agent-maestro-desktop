@@ -19,6 +19,7 @@ import {
 import { applyCopilotPromptCache } from "./prompt-cache";
 import { mapModelName } from "./converter/model-mapper";
 import { fetchCopilotModelEntries } from "./models";
+import { CopilotUpstreamError, truncateUpstreamBody } from "../../copilot/upstream-error";
 import type { CopilotToken } from "../../copilot/types";
 import type {
   AnthropicOutputConfig,
@@ -312,7 +313,11 @@ export class CopilotAnthropicClient {
 
     if (!response.ok) {
       const bodyText = await response.text();
-      throw new Error(`Copilot Anthropic Messages error (${response.status}): ${bodyText}`);
+      throw new CopilotUpstreamError(
+        `Copilot Anthropic Messages error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(bodyText),
+      );
     }
 
     const json = await response.json() as AnthropicResponse;
@@ -342,7 +347,11 @@ export class CopilotAnthropicClient {
 
     if (!response.ok) {
       const bodyText = await response.text();
-      throw new Error(`Copilot Anthropic Messages stream error (${response.status}): ${bodyText}`);
+      throw new CopilotUpstreamError(
+        `Copilot Anthropic Messages stream error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(bodyText),
+      );
     }
 
     return response;

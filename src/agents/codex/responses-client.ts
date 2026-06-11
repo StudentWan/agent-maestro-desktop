@@ -30,6 +30,7 @@ import {
   buildCopilotHeaders,
   buildCopilotStreamHeaders,
 } from "../../copilot/headers";
+import { CopilotUpstreamError, truncateUpstreamBody } from "../../copilot/upstream-error";
 
 /** Resolve `${baseUrl}/responses`, normalising any trailing `/v1` segment. */
 function resolveResponsesUrl(baseUrl: string): string {
@@ -84,8 +85,10 @@ export class CopilotResponsesClient {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(
-        `Copilot Responses API error (${response.status}): ${text}`,
+      throw new CopilotUpstreamError(
+        `Copilot Responses API error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(text),
       );
     }
     return response.json();
@@ -107,8 +110,10 @@ export class CopilotResponsesClient {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(
-        `Copilot Responses API stream error (${response.status}): ${text}`,
+      throw new CopilotUpstreamError(
+        `Copilot Responses API stream error (${response.status})`,
+        response.status,
+        truncateUpstreamBody(text),
       );
     }
 
