@@ -93,6 +93,12 @@ export interface RequestLogEntry {
 // Config — generic top-level
 export interface AppConfig {
   proxyPort: number;
+  /**
+   * App version shown in the status bar. `"local"` in dev (electron-forge
+   * start), otherwise the version baked into the packaged app's
+   * package.json by the release workflow.
+   */
+  appVersion: string;
 }
 
 // Store

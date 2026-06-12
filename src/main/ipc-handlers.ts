@@ -547,7 +547,13 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle("config:get" satisfies IpcChannels, () => {
     const port = proxyServer?.getPort() ?? getProxyPort();
-    const config: AppConfig = { proxyPort: port };
+    // Dev runs (electron-forge start) don't carry a meaningful release
+    // version — package.json still says 1.0.0 — so show "local" to make
+    // it obvious the user isn't on a published build. Packaged builds
+    // use app.getVersion() which reflects whatever the release workflow
+    // wrote into package.json before `npm run make`.
+    const appVersion = app.isPackaged ? app.getVersion() : "local";
+    const config: AppConfig = { proxyPort: port, appVersion };
     return config;
   });
 
