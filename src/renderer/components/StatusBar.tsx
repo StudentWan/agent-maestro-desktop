@@ -4,9 +4,10 @@ import type { AuthStatus, ProxyStatus } from "../../shared/types";
 interface Props {
   authStatus: AuthStatus;
   proxyStatus: ProxyStatus;
+  appVersion: string;
 }
 
-export default function StatusBar({ authStatus, proxyStatus }: Props) {
+export default function StatusBar({ authStatus, proxyStatus, appVersion }: Props) {
   return (
     <footer className="px-6 py-2 bg-gray-800 border-t border-gray-700 flex items-center justify-between text-xs text-gray-400">
       <div className="flex items-center gap-4">
@@ -31,7 +32,15 @@ export default function StatusBar({ authStatus, proxyStatus }: Props) {
           </span>
         </div>
       </div>
-      <span>Agent Maestro Desktop v1.0.0</span>
+      <span>Agent Maestro Desktop {formatVersion(appVersion)}</span>
     </footer>
   );
+}
+
+function formatVersion(version: string): string {
+  if (version === "local") return "local";
+  // Pre-pend `v` only when the upstream string is a bare semver-ish version.
+  // The release workflow strips a leading `v` before writing package.json,
+  // so we always re-add it here for visual consistency.
+  return version.startsWith("v") ? version : `v${version}`;
 }

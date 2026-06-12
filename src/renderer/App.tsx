@@ -128,7 +128,11 @@ export default function App() {
       </main>
 
       {/* Status bar */}
-      <StatusBar authStatus={authStatus} proxyStatus={proxyStatus} />
+      <StatusBar
+        authStatus={authStatus}
+        proxyStatus={proxyStatus}
+        appVersion={config?.appVersion ?? "local"}
+      />
     </div>
   );
 }

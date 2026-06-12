@@ -22,6 +22,26 @@ jobs:
         with:
           node-version: '22'
 
+      # Stamp the input version into package.json BEFORE `npm run make`.
+      # Why this matters: electron-packager copies package.json into the
+      # packaged app, and app.getVersion() reads from that copy at runtime.
+      # Stamping here makes the status bar in the produced installer show
+      # the release tag (e.g. v1.2.3 → "v1.2.3").
+      #
+      # The leading `v` is stripped because npm requires bare semver; the
+      # renderer re-adds the `v` for display in StatusBar.tsx.
+      #
+      # `npm version` is preferred over hand-editing JSON: it keeps
+      # package.json formatting consistent and updates package-lock.json's
+      # root version in lock-step so a later `npm ci` (if any) won't fail.
+      - name: Stamp release version into package.json
+        run: |
+          $raw = "${{ github.event.inputs.version }}"
+          $semver = $raw -replace '^v', ''
+          npm version $semver --no-git-tag-version --allow-same-version
+          Write-Host "package.json version set to $semver"
+        shell: pwsh
+
       - name: Install dependencies
         run: npm install
 
