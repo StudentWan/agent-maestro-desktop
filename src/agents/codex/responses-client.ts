@@ -42,15 +42,33 @@ function resolveResponsesUrl(baseUrl: string): string {
 }
 
 /**
- * Body fields we strip before forwarding. Copilot's /responses validator
- * rejects state-carrying parameters because the proxy is stateless; let's
- * be the one that says "no" instead of relaying upstream's terse 400.
+ * Body fields we strip before forwarding. Two categories share this list:
  *
- * The route handler also rejects `previous_response_id` / `conversation`
- * with a 400 *before* we get here — the strip below is a belt-and-braces
- * guard for any future client that finds another way to add them.
+ *  - State-carrying parameters Copilot's `/responses` validator rejects
+ *    because the proxy is stateless (`previous_response_id`, `conversation`).
+ *    The route handler also rejects these up front with a 400; the strip
+ *    here is belt-and-braces.
+ *
+ *  - OpenAI-only metadata Copilot silently ignores: cache hints, billing
+ *    tier, user/safety identifiers, optional `prompt` template, opaque
+ *    `metadata` bag, `store`/`background`/`include` (all assume a stateful
+ *    Responses store, which Copilot is not). Removing them shrinks long-
+ *    session payloads enough to dodge upstream 413 Payload Too Large at
+ *    the margin — matches what Joouis's VS Code-extension version does.
  */
-const STRIPPED_BODY_FIELDS = ["previous_response_id", "conversation"] as const;
+const STRIPPED_BODY_FIELDS = [
+  "previous_response_id",
+  "conversation",
+  "store",
+  "include",
+  "background",
+  "prompt",
+  "prompt_cache_key",
+  "service_tier",
+  "user",
+  "safety_identifier",
+  "metadata",
+] as const;
 
 function sanitizeBody(body: unknown): unknown {
   if (!body || typeof body !== "object") return body;

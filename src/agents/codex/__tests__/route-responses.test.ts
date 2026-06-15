@@ -197,4 +197,87 @@ describe("codex responses route", () => {
     expect(entry.upstreamError).toEqual({ status: 502, body: upstreamBody });
     expect(entry.error).toContain("Copilot Responses API error (502)");
   });
+
+  it("maps upstream HTTP 413 to a streaming response.failed with context_length_exceeded", async () => {
+    const app = new Hono();
+    const createResponseStream = vi
+      .fn()
+      .mockRejectedValue(
+        new CopilotUpstreamError(
+          "Copilot Responses API stream error (413)",
+          413,
+          "<html>Payload too large</html>",
+        ),
+      );
+    registerResponsesRoute(app, () => makeClient({ createResponseStream }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.5", input: "hi", stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: response.failed");
+    expect(text).toContain("context_length_exceeded");
+    // Must NOT mention server_error — that's the old generic code Codex
+    // doesn't react to.
+    expect(text).not.toMatch(/"code"\s*:\s*"server_error"/);
+  });
+
+  it("maps body-pattern context-length errors to context_length_exceeded (non-413 status)", async () => {
+    const app = new Hono();
+    const createResponse = vi
+      .fn()
+      .mockRejectedValue(
+        new CopilotUpstreamError(
+          "Copilot Responses API error (400)",
+          400,
+          '{"error":{"message":"This model\\u0027s maximum context length is 128000 tokens. Your messages resulted in 200000 tokens."}}',
+        ),
+      );
+    registerResponsesRoute(app, () => makeClient({ createResponse }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.5", input: "hi" }),
+    });
+
+    // Non-stream uses 200 + status:incomplete so Codex's non-stream client
+    // treats it as a clean compaction signal.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("incomplete");
+    expect(body.incomplete_details).toEqual({
+      reason: "context_length_exceeded",
+    });
+    expect(body.error?.code).toBe("context_length_exceeded");
+  });
+
+  it("leaves non-context upstream errors as server_error / 502", async () => {
+    const app = new Hono();
+    const createResponseStream = vi
+      .fn()
+      .mockRejectedValue(
+        new CopilotUpstreamError(
+          "Copilot Responses API stream error (500)",
+          500,
+          "internal server error",
+        ),
+      );
+    registerResponsesRoute(app, () => makeClient({ createResponseStream }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.5", input: "hi", stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('"code":"server_error"');
+    expect(text).not.toContain("context_length_exceeded");
+  });
 });

@@ -63,4 +63,45 @@ describe("Codex remote-config script generators", () => {
     const script = buildWriteCodexConfigScript(23337, "gpt-5'; rm -rf ~");
     expect(script).not.toContain("'; rm -rf ~");
   });
+
+  it("write script embeds model_context_window when contextWindow is provided", () => {
+    const script = buildWriteCodexConfigScript(23337, "gpt-5.5", {
+      contextWindow: 922000,
+    });
+    expect(script).toContain("data['model_context_window'] = 922000");
+  });
+
+  it("write script omits model_context_window when contextWindow is missing or invalid", () => {
+    for (const opts of [
+      undefined,
+      {},
+      { contextWindow: 0 },
+      { contextWindow: -1 },
+      { contextWindow: Number.NaN },
+    ]) {
+      const script = buildWriteCodexConfigScript(23337, "gpt-5.5", opts);
+      expect(script).not.toContain("data['model_context_window']");
+    }
+  });
+
+  it("update-model script writes model_context_window when contextWindow is provided", () => {
+    const script = buildUpdateCodexModelScript("gpt-4o", { contextWindow: 64000 });
+    expect(script).toContain("data['model'] = 'gpt-4o'");
+    expect(script).toContain("data['model_context_window'] = 64000");
+  });
+
+  it("update-model script omits model_context_window when not provided (does not clobber remote)", () => {
+    const script = buildUpdateCodexModelScript("gpt-4o");
+    expect(script).not.toContain("data['model_context_window']");
+  });
+
+  it("rejects non-integer / injection attempts in contextWindow (only digits embedded)", () => {
+    // The signature is `number`, but a malicious caller could pass NaN /
+    // Infinity / a fractional value. Floor + finite-check guards the inline.
+    const script = buildWriteCodexConfigScript(23337, "gpt-5.5", {
+      contextWindow: 922000.7 as number,
+    });
+    expect(script).toContain("data['model_context_window'] = 922000");
+    expect(script).not.toContain("922000.7");
+  });
 });

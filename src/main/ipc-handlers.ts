@@ -22,6 +22,8 @@ import {
   getSelectedModel,
   setSelectedModel,
   getAllSelectedModels,
+  getSelectedModelContextWindow,
+  setSelectedModelContextWindow,
 } from "../store/app-store";
 import type {
   AuthStatus,
@@ -29,7 +31,7 @@ import type {
   AppConfig,
   RequestLogEntry,
 } from "../shared/types";
-import { CodespaceManager, type AgentModelMap } from "../codespace/codespace-manager";
+import { CodespaceManager, type AgentModelMap, type AgentModelOptionsMap } from "../codespace/codespace-manager";
 import { checkGhCli } from "../codespace/gh-cli";
 import { VsCodeCodespaceDetector } from "../codespace/vscode-detector";
 import { AutoBridgeOrchestrator } from "../codespace/auto-bridge";
@@ -41,6 +43,7 @@ import {
   type AgentDescriptor,
   type AgentId,
   type AgentPlugin,
+  type AgentWriteModelOptions,
   describeAgent,
 } from "../agents/types";
 
@@ -108,6 +111,23 @@ function getAgentModelMap(): AgentModelMap {
   return map as AgentModelMap;
 }
 
+/**
+ * Build the parallel `{ claude: { contextWindow }, codex: { contextWindow } }`
+ * snapshot. Entries are omitted when no cached value exists — callers must
+ * tolerate `undefined` for any agent (auto-bridge runs before a model is
+ * resolved; codex tunnels predating this fix have no cached window).
+ */
+function getAgentModelOptionsMap(): AgentModelOptionsMap {
+  const map: Partial<Record<AgentId, AgentWriteModelOptions>> = {};
+  for (const plugin of AGENTS) {
+    const cw = getSelectedModelContextWindow(plugin.id);
+    if (cw !== null && cw !== undefined) {
+      map[plugin.id] = { contextWindow: cw };
+    }
+  }
+  return map;
+}
+
 function getOrCreateCodespaceManager(): CodespaceManager {
   if (!codespaceManager) {
     const port = proxyServer?.getPort() ?? getProxyPort();
@@ -152,6 +172,7 @@ function ensureAutoBridgeRunning(): void {
   });
   autoBridge = new AutoBridgeOrchestrator(vscodeDetector, manager, {
     getAgentModels: () => getAgentModelMap(),
+    getAgentModelOptions: () => getAgentModelOptionsMap(),
   });
   vscodeDetector.start();
   autoBridge.start();
@@ -226,10 +247,16 @@ async function autoSelectModelsForAllAgents(): Promise<void> {
       try {
         const models = await plugin.fetchModels(tokenManager!);
         if (models.length === 0) return;
-        const firstModel = models[0].id;
-        setSelectedModel(plugin.id, firstModel);
-        await plugin.localConfig.writeModel(firstModel).catch(() => {});
-        console.log(`[IPC] Auto-selected first model for ${plugin.id}: ${firstModel}`);
+        const firstModel = models[0];
+        setSelectedModel(plugin.id, firstModel.id);
+        setSelectedModelContextWindow(plugin.id, firstModel.contextWindow ?? null);
+        await plugin.localConfig
+          .writeModel(firstModel.id, { contextWindow: firstModel.contextWindow })
+          .catch(() => {});
+        console.log(
+          `[IPC] Auto-selected first model for ${plugin.id}: ${firstModel.id}` +
+            (firstModel.contextWindow ? ` (context window ${firstModel.contextWindow})` : ""),
+        );
       } catch (err) {
         console.warn(`[IPC] Failed to auto-select model for ${plugin.id}:`, err);
       }
@@ -577,15 +604,32 @@ export function registerIpcHandlers(): void {
         // plugin so each agent gets its own first-model bootstrap.
         const currentModel = getSelectedModel(agentId);
         if ((!currentModel || currentModel === "") && models.length > 0) {
-          const firstModel = models[0].id;
-          setSelectedModel(agentId, firstModel);
-          await plugin.localConfig.writeModel(firstModel).catch((err) => {
-            console.error(
-              `[IPC] Failed to write auto-selected model for ${agentId}:`,
-              err,
-            );
-          });
-          console.log(`[IPC] Auto-selected first model for ${agentId}: ${firstModel}`);
+          const firstModel = models[0];
+          setSelectedModel(agentId, firstModel.id);
+          setSelectedModelContextWindow(agentId, firstModel.contextWindow ?? null);
+          await plugin.localConfig
+            .writeModel(firstModel.id, { contextWindow: firstModel.contextWindow })
+            .catch((err) => {
+              console.error(
+                `[IPC] Failed to write auto-selected model for ${agentId}:`,
+                err,
+              );
+            });
+          console.log(
+            `[IPC] Auto-selected first model for ${agentId}: ${firstModel.id}` +
+              (firstModel.contextWindow
+                ? ` (context window ${firstModel.contextWindow})`
+                : ""),
+          );
+        } else if (currentModel) {
+          // Refresh the cached context window for the existing selection
+          // so a user who selected a model before this field existed (or
+          // before Copilot started reporting it for that model) gets the
+          // value populated retroactively.
+          const match = models.find((m) => m.id === currentModel);
+          if (match?.contextWindow) {
+            setSelectedModelContextWindow(agentId, match.contextWindow);
+          }
         }
 
         return models;
@@ -612,9 +656,33 @@ export function registerIpcHandlers(): void {
         return modelId;
       }
       setSelectedModel(agentId, modelId);
+
+      // Resolve the model's context window so we can stamp it into the
+      // local + remote config. Best-effort: a fetch failure here doesn't
+      // block the selection — the writer just won't set
+      // `model_context_window`, and Codex falls back to its built-in
+      // default (the pre-fix behaviour).
+      let contextWindow: number | undefined;
+      if (tokenManager) {
+        try {
+          const models = await plugin.fetchModels(tokenManager);
+          const match = models.find((m) => m.id === modelId);
+          contextWindow = match?.contextWindow;
+        } catch (err) {
+          console.warn(
+            `[IPC] set-selected-model: failed to resolve context window for ${agentId}/${modelId}:`,
+            err,
+          );
+        }
+      }
+      setSelectedModelContextWindow(agentId, contextWindow ?? null);
+
       try {
-        await plugin.localConfig.writeModel(modelId);
-        console.log(`[IPC] Model for ${agentId} set to: ${modelId}`);
+        await plugin.localConfig.writeModel(modelId, { contextWindow });
+        console.log(
+          `[IPC] Model for ${agentId} set to: ${modelId}` +
+            (contextWindow ? ` (context window ${contextWindow})` : ""),
+        );
       } catch (error) {
         console.error(
           `[IPC] Failed to write model to local config for ${agentId}:`,
@@ -624,7 +692,7 @@ export function registerIpcHandlers(): void {
       // Push to currently-connected codespaces (per-agent).
       if (codespaceManager) {
         codespaceManager
-          .updateModel(agentId as AgentId, modelId)
+          .updateModel(agentId as AgentId, modelId, { contextWindow })
           .catch((err) => {
             console.error(
               `[IPC] Failed to update model in Codespaces for ${agentId}:`,
@@ -643,6 +711,7 @@ export function registerIpcHandlers(): void {
       if (!plugin) return null;
       const port = proxyServer?.getPort() ?? getProxyPort();
       const modelId = getSelectedModel(agentId);
+      const contextWindow = getSelectedModelContextWindow(agentId) ?? undefined;
       const baseUrl =
         plugin.routePrefix.length > 0
           ? `http://127.0.0.1:${port}${plugin.routePrefix}/v1`
@@ -651,7 +720,7 @@ export function registerIpcHandlers(): void {
         agentId: plugin.id,
         proxyPort: port,
         baseUrl,
-        snippet: plugin.localConfig.getSnippet(port, modelId),
+        snippet: plugin.localConfig.getSnippet(port, modelId, { contextWindow }),
       };
     },
   );
@@ -703,13 +772,14 @@ export function registerIpcHandlers(): void {
       throw new Error(`Codespace "${name}" not found`);
     }
     const models = getAgentModelMap();
+    const modelOptions = getAgentModelOptionsMap();
 
     // If Codespace is Shutdown, start it first
     if (info.state === "Shutdown") {
-      return manager.startAndConnect(info, models);
+      return manager.startAndConnect(info, models, modelOptions);
     }
 
-    return manager.connect(info, models);
+    return manager.connect(info, models, modelOptions);
   });
 
   ipcMain.handle("codespace:disconnect" satisfies IpcChannels, async (_event, name: string): Promise<void> => {

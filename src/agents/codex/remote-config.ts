@@ -34,6 +34,7 @@
  * is false.
  */
 import { ATOMIC_DUMP_HELPER } from "../../codespace/atomic-dump";
+import type { AgentWriteModelOptions } from "../types";
 
 const PROVIDER_NAME = "agent-maestro";
 const PROVIDER_DISPLAY = "Agent Maestro Desktop";
@@ -401,17 +402,35 @@ function pythonHeredoc(body: string): string {
 }
 
 /**
+ * Render a positive integer literal safely. Used to embed
+ * `model_context_window` into the inlined Python — `int(value)` would
+ * fail if the value crossed the IPC layer as a string, so we coerce here
+ * and inline the digits literally.
+ */
+function safeContextWindowLiteral(value: number | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return String(Math.floor(value));
+}
+
+/**
  * Build the script that merges our provider into the codespace's
  * config.toml. Idempotent — re-running produces the same file.
  */
 export function buildWriteCodexConfigScript(
   port: number,
   model: string,
+  options?: AgentWriteModelOptions,
 ): string {
   const safeModel = safeModelLiteral(model);
   // The `model` line is omitted when the caller passes an empty string
   // — same convention as the local writer.
   const setModelLine = safeModel ? `data['model'] = '${safeModel}'` : "";
+  const ctxLiteral = safeContextWindowLiteral(options?.contextWindow);
+  const setCtxLine = ctxLiteral
+    ? `data['model_context_window'] = ${ctxLiteral}`
+    : "";
   const body = `
 import os
 ${ATOMIC_DUMP_HELPER}
@@ -421,6 +440,7 @@ p = os.path.expanduser('~/.codex/config.toml')
 data = _read_config(p)
 data['model_provider'] = '${PROVIDER_NAME}'
 ${setModelLine}
+${setCtxLine}
 mps = data.get('model_providers') or {}
 mps['${PROVIDER_NAME}'] = {
     'name': '${PROVIDER_DISPLAY}',
@@ -438,9 +458,22 @@ _atomic_dump_text(_toml_dump(data), p)
  * Build the script that sets only the `model` field. The provider
  * config is left in place; if no provider is configured yet, the next
  * write script invocation will fill it in.
+ *
+ * When `options.contextWindow` is provided, also writes
+ * `model_context_window` so the remote Codex compacts at the correct
+ * threshold. Omitting it leaves the existing value alone — switching to
+ * a model whose context window hasn't been fetched yet won't clobber a
+ * previously-correct value.
  */
-export function buildUpdateCodexModelScript(model: string): string {
+export function buildUpdateCodexModelScript(
+  model: string,
+  options?: AgentWriteModelOptions,
+): string {
   const safeModel = safeModelLiteral(model);
+  const ctxLiteral = safeContextWindowLiteral(options?.contextWindow);
+  const setCtxLine = ctxLiteral
+    ? `data['model_context_window'] = ${ctxLiteral}`
+    : "";
   const body = `
 import os
 ${ATOMIC_DUMP_HELPER}
@@ -449,6 +482,7 @@ ${TOML_EMITTER}
 p = os.path.expanduser('~/.codex/config.toml')
 data = _read_config(p)
 data['model'] = '${safeModel}'
+${setCtxLine}
 _atomic_dump_text(_toml_dump(data), p)
 `;
   return pythonHeredoc(body);
