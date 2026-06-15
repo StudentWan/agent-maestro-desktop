@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { parse, stringify } from "smol-toml";
-import type { AgentLocalConfigSnippet } from "../types";
+import type { AgentLocalConfigSnippet, AgentWriteModelOptions } from "../types";
 
 /**
  * Local writer for `~/.codex/config.toml`.
@@ -44,6 +44,7 @@ const PROVIDER_DISPLAY = "Agent Maestro Desktop";
 interface CodexConfig {
   model?: string;
   model_provider?: string;
+  model_context_window?: number;
   model_providers?: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
 }
@@ -141,6 +142,7 @@ function mergeProvider(
   existing: CodexConfig,
   port: number,
   modelId: string | null,
+  contextWindow?: number,
 ): CodexConfig {
   const merged: CodexConfig = {
     ...existing,
@@ -157,6 +159,9 @@ function mergeProvider(
   };
   if (modelId) {
     merged.model = modelId;
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    merged.model_context_window = contextWindow;
   }
   return merged;
 }
@@ -218,13 +223,30 @@ export async function removeCodexConfig(_port: number): Promise<void> {
  * the port from the existing provider entry if present). If no provider
  * exists yet, we still write the model — the next `applyCodexConfig`
  * call will fill in the provider.
+ *
+ * When `options.contextWindow` is provided, also writes
+ * `model_context_window = <N>` so Codex auto-compacts before bodies hit
+ * Copilot's 413 ceiling. The field is left untouched (not deleted) when
+ * the option is omitted — that way switching to a model whose context
+ * window hasn't been fetched yet won't clobber a previously-correct value.
  */
-export async function writeModelToCodexConfig(modelId: string): Promise<void> {
+export async function writeModelToCodexConfig(
+  modelId: string,
+  options?: AgentWriteModelOptions,
+): Promise<void> {
   const raw = await readFileOrEmpty(CONFIG_PATH);
   const existing = parseExisting(raw);
   existing.model = modelId;
+  const ctx = options?.contextWindow;
+  if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
+    existing.model_context_window = ctx;
+  }
   await writeFileAtomic(CONFIG_PATH, stringifyCodexConfig(existing));
-  console.log(`[CodexConfig] Model set to: ${modelId}`);
+  console.log(
+    `[CodexConfig] Model set to: ${modelId}${
+      typeof ctx === "number" ? `, model_context_window=${ctx}` : ""
+    }`,
+  );
 }
 
 /**
@@ -236,8 +258,9 @@ export async function writeModelToCodexConfig(modelId: string): Promise<void> {
 export function getCodexConfigSnippet(
   port: number,
   modelId: string | null,
+  options?: AgentWriteModelOptions,
 ): AgentLocalConfigSnippet {
-  const snippet = mergeProvider({}, port, modelId);
+  const snippet = mergeProvider({}, port, modelId, options?.contextWindow);
   return {
     envVars: {},
     file: {

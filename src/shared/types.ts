@@ -120,6 +120,13 @@ export interface StoreSchema {
    * `src/store/app-store.ts` migration block.
    */
   selectedModels: Record<string, string | null>;
+  /**
+   * Per-agent cached `max_prompt_tokens` for the currently selected model,
+   * captured from Copilot `/models` at selection time. Codex stamps it
+   * into `model_context_window` so the CLI compacts before bodies hit
+   * the upstream 413 ceiling. Keys are agent ids.
+   */
+  selectedModelContextWindows?: Record<string, number | null>;
   /** @deprecated kept for one release so the migration can find it. */
   selectedModel?: string | null;
 }

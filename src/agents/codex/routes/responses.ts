@@ -170,6 +170,21 @@ export function registerResponsesRoute(
         c.set("loggedUpstreamError", { status: error.status, body: error.body });
       }
 
+      // Detect context-window overflow from upstream. Treats both an
+      // explicit 413 (request body too large to even parse) and any
+      // 4xx/5xx whose body mentions context-length/payload-size as a
+      // signal Codex CLI should auto-compact. Mirrors the same treatment
+      // we give Claude in `src/agents/claude/routes/messages.ts` for
+      // context_length_exceeded — without this Codex just dies with a
+      // raw "server_error" on long sessions and loses the conversation.
+      const isContextExceeded = isContextWindowExceededError(error, message);
+      const errorCode = isContextExceeded
+        ? "context_length_exceeded"
+        : "server_error";
+      const errorMessage = isContextExceeded
+        ? "Model context window exceeded; compact and retry."
+        : message;
+
       if (isStream) {
         // Codex CLI is mid-SSE; emit a minimal `response.failed` event so
         // its parser surfaces the reason instead of "stream disconnected
@@ -202,7 +217,7 @@ export function registerResponsesRoute(
               status: "failed",
               model: originalModel,
               output: [],
-              error: { code: "server_error", message },
+              error: { code: errorCode, message: errorMessage },
             },
           };
           await s.write(
@@ -211,6 +226,23 @@ export function registerResponsesRoute(
           await s.write(
             `event: response.failed\ndata: ${JSON.stringify(failed)}\n\n`,
           );
+        });
+      }
+
+      if (isContextExceeded) {
+        // For non-streaming, return a 200 with status:"incomplete" carrying
+        // the same code so Codex's non-stream client treats it as a clean
+        // compaction signal rather than a transport-level 502 (which it
+        // logs and aborts on).
+        return c.json({
+          id: `resp_${Date.now()}`,
+          object: "response",
+          created_at: Math.floor(Date.now() / 1000),
+          status: "incomplete",
+          incomplete_details: { reason: "context_length_exceeded" },
+          model: originalModel,
+          output: [],
+          error: { code: errorCode, message: errorMessage },
         });
       }
 
@@ -226,4 +258,15 @@ export function registerResponsesRoute(
       );
     }
   });
+}
+
+const CONTEXT_EXCEEDED_PATTERNS =
+  /context.*(length|window|limit)|too many tokens|payload[\s_-]?too[\s_-]?large|prompt.*too.*long|max(?:imum)?[\s_-]?tokens|exceeds[\s_-]?(?:the[\s_-]?)?(?:max|context)/i;
+
+function isContextWindowExceededError(error: unknown, message: string): boolean {
+  if (error instanceof CopilotUpstreamError) {
+    if (error.status === 413) return true;
+    if (CONTEXT_EXCEEDED_PATTERNS.test(error.body)) return true;
+  }
+  return CONTEXT_EXCEEDED_PATTERNS.test(message);
 }

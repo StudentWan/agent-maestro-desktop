@@ -6,7 +6,7 @@ import {
   startCodespace as ghStartCodespace,
   probeReverseTunnel,
 } from "./gh-cli";
-import type { AgentId, AgentPlugin } from "../agents/types";
+import type { AgentId, AgentPlugin, AgentWriteModelOptions } from "../agents/types";
 import { MAX_RECONNECT_ATTEMPTS, MAX_PORT_RETRIES, CODESPACE_HEALTH_CHECK_INTERVAL_MS } from "../shared/constants";
 import type {
   CodespaceInfo,
@@ -23,6 +23,16 @@ const REMOTE_CONFIG_MAX_ATTEMPTS = 4;
  * codespace can be configured for every agent in a single SSH session.
  */
 export type AgentModelMap = Readonly<Record<AgentId, string>>;
+
+/**
+ * Optional per-agent extras (currently: cached Copilot `max_prompt_tokens`)
+ * that ride alongside `AgentModelMap` into connect()/updateModel(). Kept
+ * as a separate optional map so callers that don't have the data (auto-
+ * bridge, legacy paths) keep working with `undefined`.
+ */
+export type AgentModelOptionsMap = Readonly<
+  Partial<Record<AgentId, AgentWriteModelOptions>>
+>;
 
 interface ConnectionEntry {
   readonly connection: CodespaceConnection;
@@ -88,6 +98,7 @@ export class CodespaceManager extends EventEmitter {
     name: string,
     remotePort: number,
     models: AgentModelMap,
+    modelOptions: AgentModelOptionsMap | undefined,
     onProgress?: (
       attempt: number,
       phase: "writing-config" | "verifying-config",
@@ -111,6 +122,7 @@ export class CodespaceManager extends EventEmitter {
         name,
         remotePort,
         model,
+        modelOptions?.[plugin.id],
         plugin,
         onProgress,
       );
@@ -129,6 +141,7 @@ export class CodespaceManager extends EventEmitter {
     name: string,
     remotePort: number,
     model: string,
+    options: AgentWriteModelOptions | undefined,
     plugin: AgentPlugin,
     onProgress?: (
       attempt: number,
@@ -144,7 +157,7 @@ export class CodespaceManager extends EventEmitter {
       }
       try {
         onProgress?.(i + 1, "writing-config", plugin.id);
-        await this.exec(name, plugin.remoteConfig.buildWriteScript(remotePort, model));
+        await this.exec(name, plugin.remoteConfig.buildWriteScript(remotePort, model, options));
         const post = plugin.remoteConfig.buildPostWriteScript?.();
         if (post) {
           await this.exec(name, post);
@@ -219,18 +232,20 @@ export class CodespaceManager extends EventEmitter {
   async startAndConnect(
     info: CodespaceInfo,
     models: AgentModelMap,
+    modelOptions?: AgentModelOptionsMap,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
     await ghStartCodespace(info.name, this.getToken());
     // Wait a moment for the Codespace to become Available
     await new Promise((r) => setTimeout(r, 5000));
     const updatedInfo: CodespaceInfo = { ...info, state: "Available" };
-    return this.connect(updatedInfo, models, source);
+    return this.connect(updatedInfo, models, modelOptions, source);
   }
 
   async connect(
     info: CodespaceInfo,
     models: AgentModelMap,
+    modelOptions?: AgentModelOptionsMap,
     source: CodespaceConnectionSource = "manual",
   ): Promise<CodespaceConnection> {
     const hasToken = !!this.getToken();
@@ -400,6 +415,7 @@ export class CodespaceManager extends EventEmitter {
       info.name,
       remotePort,
       models,
+      modelOptions,
       (attempt, phase, pluginId) => {
         connection = updateConnection(connection, {
           progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS, pluginId },
@@ -456,7 +472,7 @@ export class CodespaceManager extends EventEmitter {
 
     // Setup reconnect handler
     tunnel.on("unexpectedExit", () => {
-      this.handleUnexpectedDisconnect(info.name, models);
+      this.handleUnexpectedDisconnect(info.name, models, modelOptions);
     });
 
     // Start health check (app-level: curl /health through tunnel)
@@ -587,7 +603,11 @@ export class CodespaceManager extends EventEmitter {
    * id; the manager picks the matching plugin's `buildUpdateModelScript`
    * and runs it. Other agents on each codespace are not touched.
    */
-  async updateModel(agentId: AgentId, model: string): Promise<void> {
+  async updateModel(
+    agentId: AgentId,
+    model: string,
+    options?: AgentWriteModelOptions,
+  ): Promise<void> {
     const plugin = this.plugins.find((p) => p.id === agentId);
     if (!plugin) {
       console.warn(`[CodespaceManager] updateModel: no plugin registered for "${agentId}"`);
@@ -598,7 +618,7 @@ export class CodespaceManager extends EventEmitter {
       // against a stopped/erroring codespace can resurrect it.
       if (entry.connection.connectionState !== "connected") return;
       try {
-        await this.exec(name, plugin.remoteConfig.buildUpdateModelScript(model));
+        await this.exec(name, plugin.remoteConfig.buildUpdateModelScript(model, options));
       } catch {
         console.warn(`[CodespaceManager] Model update failed for ${agentId} on ${name}`);
       }
@@ -656,7 +676,11 @@ export class CodespaceManager extends EventEmitter {
     this.connections.set(name, { ...entry, connection: updated });
   }
 
-  private async handleUnexpectedDisconnect(name: string, models: AgentModelMap): Promise<void> {
+  private async handleUnexpectedDisconnect(
+    name: string,
+    models: AgentModelMap,
+    modelOptions?: AgentModelOptionsMap,
+  ): Promise<void> {
     const entry = this.connections.get(name);
     if (!entry) {
       console.log(
@@ -808,7 +832,7 @@ export class CodespaceManager extends EventEmitter {
       // Use the same retry-and-verify path as the initial connect — a
       // reconnect after the codespace was briefly unreachable is exactly
       // when SSH is least cooperative.
-      await this.writeRemoteConfigWithRetry(name, newPort, models, (attempt, phase, pluginId) => {
+      await this.writeRemoteConfigWithRetry(name, newPort, models, modelOptions, (attempt, phase, pluginId) => {
         updated = updateConnection(updated, {
           progress: { phase, attempt, maxAttempts: REMOTE_CONFIG_MAX_ATTEMPTS, pluginId },
         });
@@ -829,7 +853,7 @@ export class CodespaceManager extends EventEmitter {
       }
 
       tunnel.on("unexpectedExit", () => {
-        this.handleUnexpectedDisconnect(name, models);
+        this.handleUnexpectedDisconnect(name, models, modelOptions);
       });
 
       updated = updateConnection(updated, {

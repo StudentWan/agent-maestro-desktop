@@ -1,5 +1,5 @@
 import { VSCODE_AUTO_BRIDGE_GRACE_MS } from "../shared/constants";
-import type { AgentModelMap, CodespaceManager } from "./codespace-manager";
+import type { AgentModelMap, AgentModelOptionsMap, CodespaceManager } from "./codespace-manager";
 import type { VsCodeCodespaceDetector } from "./vscode-detector";
 import type { CodespaceInfo } from "./types";
 
@@ -11,6 +11,14 @@ export interface AutoBridgeOrchestratorOptions {
    * agent simultaneously.
    */
   getAgentModels: () => AgentModelMap;
+  /**
+   * Optional snapshot of per-agent extras (e.g. cached
+   * `max_prompt_tokens`) recorded at model selection time. When provided,
+   * connect() stamps Codex's `model_context_window` so the remote CLI
+   * compacts before bodies exceed Copilot's 413 ceiling. Optional so
+   * legacy bootstrap paths keep working.
+   */
+  getAgentModelOptions?: () => AgentModelOptionsMap;
 }
 
 /**
@@ -24,6 +32,7 @@ export class AutoBridgeOrchestrator {
   private readonly manager: CodespaceManager;
   private readonly graceMs: number;
   private readonly getAgentModels: () => AgentModelMap;
+  private readonly getAgentModelOptions: () => AgentModelOptionsMap;
 
   private readonly pendingDisconnects = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightConnects = new Set<string>();
@@ -39,6 +48,7 @@ export class AutoBridgeOrchestrator {
     this.manager = manager;
     this.graceMs = options.graceMs ?? VSCODE_AUTO_BRIDGE_GRACE_MS;
     this.getAgentModels = options.getAgentModels;
+    this.getAgentModelOptions = options.getAgentModelOptions ?? (() => ({}));
   }
 
   start(): void {
@@ -172,8 +182,9 @@ export class AutoBridgeOrchestrator {
           : Promise.resolve();
 
       const models = this.getAgentModels();
+      const modelOptions = this.getAgentModelOptions();
       void cleanup
-        .then(() => this.manager.connect(info, models, "vscode-auto"))
+        .then(() => this.manager.connect(info, models, modelOptions, "vscode-auto"))
         .catch((err) => {
           console.warn(`[AutoBridge] connect ${name} failed:`, err);
         })

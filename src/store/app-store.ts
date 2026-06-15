@@ -10,6 +10,7 @@ const store = new Store<StoreSchema>({
     autoStart: true,
     minimizeToTray: true,
     selectedModels: {},
+    selectedModelContextWindows: {},
   },
 });
 
@@ -85,6 +86,29 @@ export function getAllSelectedModels(): Record<string, string> {
     out[k] = v ?? "";
   }
   return out;
+}
+
+/**
+ * Get the cached max_prompt_tokens for one agent's currently selected
+ * model (null if unknown — e.g. user is on the previous version that
+ * didn't populate this field, or selection happened before the model
+ * list returned).
+ */
+export function getSelectedModelContextWindow(agentId: string): number | null {
+  const map = store.get("selectedModelContextWindows") ?? {};
+  return map[agentId] ?? null;
+}
+
+/** Set/clear the cached context window for one agent. */
+export function setSelectedModelContextWindow(
+  agentId: string,
+  contextWindow: number | null,
+): void {
+  const map = store.get("selectedModelContextWindows") ?? {};
+  store.set("selectedModelContextWindows", {
+    ...map,
+    [agentId]: contextWindow,
+  });
 }
 
 export default store;

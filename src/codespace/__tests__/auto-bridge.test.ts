@@ -46,6 +46,7 @@ class FakeManager {
     async (
       info: CodespaceInfo,
       _models: Record<string, string>,
+      _modelOptions: unknown,
       source: CodespaceConnectionSource = "manual",
     ) => {
       const c = makeConn(info.name, source);
@@ -56,8 +57,13 @@ class FakeManager {
   disconnectMock = vi.fn(async (name: string) => {
     this.connections = this.connections.filter((c) => c.id !== name);
   });
-  connect(info: CodespaceInfo, models: Record<string, string>, source?: CodespaceConnectionSource) {
-    return this.connectMock(info, models, source);
+  connect(
+    info: CodespaceInfo,
+    models: Record<string, string>,
+    modelOptions?: unknown,
+    source?: CodespaceConnectionSource,
+  ) {
+    return this.connectMock(info, models, modelOptions, source);
   }
   disconnect(name: string) {
     return this.disconnectMock(name);
@@ -96,6 +102,7 @@ describe("AutoBridgeOrchestrator", () => {
     expect(mgr.connectMock).toHaveBeenCalledWith(
       expect.objectContaining({ name: "foo-bar-baz-q" }),
       expect.objectContaining({ claude: "claude-opus-4.6" }),
+      expect.anything(),
       "vscode-auto",
     );
   });
@@ -289,6 +296,7 @@ describe("AutoBridgeOrchestrator", () => {
     expect(mgr.connectMock).toHaveBeenCalledWith(
       expect.objectContaining({ name: "foo-bar-baz-q" }),
       { claude: "m", codex: "" },
+      expect.anything(),
       "vscode-auto",
     );
   });

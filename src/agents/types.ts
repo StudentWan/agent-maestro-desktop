@@ -25,6 +25,16 @@ export type AgentId = "claude" | "codex";
 export interface AgentModelInfo {
   id: string;
   name: string;
+  /**
+   * Max prompt tokens reported by the upstream Copilot `/models`
+   * capabilities (`capabilities.limits.max_prompt_tokens`). Used by Codex
+   * to populate `model_context_window` in `~/.codex/config.toml` so the
+   * CLI auto-compacts at the right threshold; without this Codex falls
+   * back to a conservative default and ships oversized bodies that
+   * upstream rejects with 413. Optional — older Copilot model entries
+   * may not carry it.
+   */
+  contextWindow?: number;
 }
 
 /**
@@ -75,15 +85,34 @@ export interface AgentAppConfig {
   snippet: AgentLocalConfigSnippet;
 }
 
+/**
+ * Per-agent options passed to the local/remote config writers when the
+ * selected model changes. Currently optional — only Codex reads
+ * `contextWindow` (to set `model_context_window` in `~/.codex/config.toml`);
+ * Claude's implementations ignore the bag.
+ */
+export interface AgentWriteModelOptions {
+  /**
+   * Max prompt tokens for the selected model, from Copilot's `/models`
+   * capabilities. Codex writes this to `model_context_window` so the CLI
+   * auto-compacts before bodies exceed upstream's 413 limit.
+   */
+  contextWindow?: number;
+}
+
 export interface AgentLocalConfig {
   /** Write our managed values to the local config (env file or TOML). */
   apply(port: number): Promise<void>;
   /** Strip ONLY the values we wrote — never touch user-authored content. */
   remove(port: number): Promise<void>;
   /** Update the selected model in the local config. */
-  writeModel(modelId: string): Promise<void>;
+  writeModel(modelId: string, options?: AgentWriteModelOptions): Promise<void>;
   /** Build the snippet shown in the renderer's AgentConfigPanel. */
-  getSnippet(port: number, modelId: string | null): AgentLocalConfigSnippet;
+  getSnippet(
+    port: number,
+    modelId: string | null,
+    options?: AgentWriteModelOptions,
+  ): AgentLocalConfigSnippet;
 }
 
 /**
@@ -109,7 +138,11 @@ export interface AgentRemoteConfig {
   /** Whether a write failure should tear down the tunnel. */
   criticalForTunnel: boolean;
   /** Build a Python3 -c script that atomically writes the agent's config. */
-  buildWriteScript(port: number, modelId: string): string;
+  buildWriteScript(
+    port: number,
+    modelId: string,
+    options?: AgentWriteModelOptions,
+  ): string;
   /**
    * Build a Python3 -c script that re-runs the "post-write checklist"
    * (e.g. Claude's ~/.claude.json onboarding marker). Optional — return
@@ -124,7 +157,10 @@ export interface AgentRemoteConfig {
    */
   buildVerifyMarkerCommand(): string;
   /** Update only the model field, preserving everything else. */
-  buildUpdateModelScript(modelId: string): string;
+  buildUpdateModelScript(
+    modelId: string,
+    options?: AgentWriteModelOptions,
+  ): string;
   /** Strip our managed block; preserve user-authored content. */
   buildRemoveScript(): string;
 }

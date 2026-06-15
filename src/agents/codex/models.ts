@@ -16,6 +16,15 @@ interface CopilotModelEntry {
   version: string;
   capabilities?: {
     type?: string;
+    limits?: {
+      /**
+       * Max prompt tokens the model accepts. Read by the Codex local/
+       * remote config writers and stamped into `model_context_window` so
+       * the CLI compacts before bodies exceed Copilot's 413 ceiling.
+       * Field name mirrors what Copilot's `/models` endpoint returns.
+       */
+      max_prompt_tokens?: number;
+    };
   };
 }
 
@@ -62,7 +71,11 @@ export async function fetchAvailableCodexModels(
 
   return allModels
     .filter((m) => isSupportedCodexModel(m.id))
-    .map((m) => ({ id: m.id, name: m.name || m.id }));
+    .map((m) => ({
+      id: m.id,
+      name: m.name || m.id,
+      contextWindow: m.capabilities?.limits?.max_prompt_tokens,
+    }));
 }
 
 function buildHeaders(token: string): Record<string, string> {

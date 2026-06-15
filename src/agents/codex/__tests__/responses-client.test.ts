@@ -105,6 +105,52 @@ describe("CopilotResponsesClient", () => {
     expect(body.input).toBe("hi");
   });
 
+  it("strips OpenAI-only metadata Copilot ignores (store/include/prompt_cache_key/etc.) to dodge 413 on long sessions", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({ id: "resp_1", object: "response" }),
+    );
+
+    await client.createResponse({
+      model: "gpt-5.5",
+      input: "hi",
+      // Fields Copilot doesn't honor; we strip to shrink the body.
+      store: true,
+      include: ["reasoning.encrypted_content"],
+      background: false,
+      prompt: { id: "tpl_x", variables: {} },
+      prompt_cache_key: "cache-key-1",
+      service_tier: "auto",
+      user: "user-1",
+      safety_identifier: "safety-1",
+      metadata: { foo: "bar" },
+      // Things we MUST keep:
+      tools: [{ type: "function", name: "f", parameters: {} }],
+      reasoning: { effort: "high" },
+      instructions: "Be concise.",
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    for (const k of [
+      "store",
+      "include",
+      "background",
+      "prompt",
+      "prompt_cache_key",
+      "service_tier",
+      "user",
+      "safety_identifier",
+      "metadata",
+    ]) {
+      expect(body, `field "${k}" should be stripped`).not.toHaveProperty(k);
+    }
+    // Kept fields still there.
+    expect(body.model).toBe("gpt-5.5");
+    expect(body.tools).toHaveLength(1);
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.instructions).toBe("Be concise.");
+  });
+
   it("surfaces upstream errors with status + body in the thrown message", async () => {
     mockFetch.mockResolvedValueOnce(
       createFetchResponse(

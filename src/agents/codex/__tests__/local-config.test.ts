@@ -173,4 +173,32 @@ model_provider = "aoai-1"
       output.indexOf("[model_providers.aoai-1]"),
     );
   });
+
+  it("writes model_context_window when a positive contextWindow is supplied", () => {
+    const merged = mergeProvider({}, 23337, "gpt-5.5", 922000);
+    expect(merged.model_context_window).toBe(922000);
+
+    // Re-running with a smaller value updates the field in place.
+    const reMerged = mergeProvider(merged, 23337, "gpt-4o", 64000);
+    expect(reMerged.model_context_window).toBe(64000);
+  });
+
+  it("leaves model_context_window untouched when contextWindow is omitted", () => {
+    // A user (or a previous selection) had this value; switching to a
+    // model whose window we don't yet know mustn't clobber it.
+    const existing = mergeProvider({}, 23337, "gpt-5.5", 922000);
+    const merged = mergeProvider(existing, 23337, "gpt-4o");
+    expect(merged.model_context_window).toBe(922000);
+    expect(merged.model).toBe("gpt-4o");
+  });
+
+  it("ignores non-positive or non-finite contextWindow values", () => {
+    expect(mergeProvider({}, 23337, "gpt-5.5", 0).model_context_window).toBeUndefined();
+    expect(
+      mergeProvider({}, 23337, "gpt-5.5", -1).model_context_window,
+    ).toBeUndefined();
+    expect(
+      mergeProvider({}, 23337, "gpt-5.5", Number.NaN).model_context_window,
+    ).toBeUndefined();
+  });
 });
