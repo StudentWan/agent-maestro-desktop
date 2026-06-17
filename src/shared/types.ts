@@ -101,6 +101,15 @@ export interface AppConfig {
   appVersion: string;
 }
 
+// Diagnostics
+export type DiagnosticLogLevel = "debug" | "info" | "warn" | "error";
+
+export interface DiagnosticLogSaveResult {
+  canceled: boolean;
+  filePath?: string;
+  error?: string;
+}
+
 // Store
 export interface StoreSchema {
   githubToken: string | null;

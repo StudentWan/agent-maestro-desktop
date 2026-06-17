@@ -8,6 +8,9 @@ export type IpcChannels =
   | "proxy:get-status"
   | "token:get-info"
   | "config:get"
+  // ---- Diagnostics ----
+  | "diagnostics:save-log"
+  | "diagnostics:log"
   // ---- Per-agent (parametric) ----
   // List every registered agent { id, displayName, slug, hasFileSnippet, modelHint }
   | "agents:list"
