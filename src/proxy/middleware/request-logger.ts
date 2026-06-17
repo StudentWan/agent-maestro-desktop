@@ -1,4 +1,5 @@
 import type { Context, Next } from "hono";
+import { truncateUpstreamBody } from "../../copilot/upstream-error";
 import type { RequestLogEntry, UpstreamErrorInfo } from "../../shared/types";
 
 type LogCallback = (entry: RequestLogEntry) => void;
@@ -62,8 +63,11 @@ export function createRequestLogger(onLog: LogCallback) {
     const inputTokens = c.get("loggedInputTokens");
     const outputTokens = c.get("loggedOutputTokens");
     const thinkingLevel = c.get("loggedThinkingLevel");
-    const error = c.get("loggedError");
     const upstreamError = c.get("loggedUpstreamError");
+    let error = c.get("loggedError");
+    if (!error && !upstreamError && c.res.status >= 400) {
+      error = await readErrorResponseBody(c.res);
+    }
 
     const entry: RequestLogEntry = {
       id,
@@ -87,4 +91,19 @@ export function createRequestLogger(onLog: LogCallback) {
 
 function formatRequestLabel(method: string, path: string): string {
   return `${method.toUpperCase()} ${path}`;
+}
+
+async function readErrorResponseBody(response: Response): Promise<string> {
+  try {
+    const body = await response.clone().text();
+    if (body.length > 0) {
+      return truncateUpstreamBody(body);
+    }
+  } catch {
+    // Some response bodies (especially streams) may not be cloneable/readable.
+    // The log row should still be expandable with the status we know.
+  }
+
+  const statusText = response.statusText ? ` ${response.statusText}` : "";
+  return `HTTP ${response.status}${statusText}`;
 }

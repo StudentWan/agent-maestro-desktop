@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, Tray, nativeImage } from "electron";
 import path from "path";
 import { spawn } from "node:child_process";
 import { registerIpcHandlers, cleanup } from "./ipc-handlers";
+import { initializeDiagnostics } from "./diagnostics";
 import { getAutoStart } from "../store/app-store";
 
 // Handle Squirrel events for Windows installer (only when installed via Squirrel).
@@ -180,6 +181,9 @@ function createWindow(): void {
 // helper instance would also start the proxy server, create a tray icon,
 // open the main window, and possibly race with Update.exe writing shortcuts.
 function bootApp(): void {
+  const diagnosticLogPath = initializeDiagnostics();
+  console.log("[Main] Diagnostic logging enabled:", diagnosticLogPath);
+
   // Single-instance lock. Without this, double-clicking the desktop shortcut
   // twice (or launching from start menu while the tray instance is running)
   // spins up a second Electron process that fights the first for port 23337

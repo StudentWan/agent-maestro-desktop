@@ -34,6 +34,20 @@ describe('request-logger middleware', () => {
     expect(entry.status).toBe(404)
   })
 
+  it('captures non-OK response body when route does not set loggedError', async () => {
+    const logCallback = vi.fn()
+    const app = new Hono()
+
+    app.use('*', createRequestLogger(logCallback))
+    app.get('/error', (c) => c.json({ error: 'not found' }, 404))
+
+    await app.request('/error')
+
+    const entry = logCallback.mock.calls[0][0]
+    expect(entry.status).toBe(404)
+    expect(entry.error).toBe('{"error":"not found"}')
+  })
+
   it('detects SSE stream requests from Accept header', async () => {
     const logCallback = vi.fn()
     const app = new Hono()

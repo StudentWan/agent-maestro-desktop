@@ -19,6 +19,11 @@ const api = {
   // Top-level config (proxy port etc — agent-agnostic)
   getConfig: () => ipcRenderer.invoke("config:get" satisfies IpcChannels),
 
+  // Diagnostics
+  saveDiagnosticLog: () => ipcRenderer.invoke("diagnostics:save-log" satisfies IpcChannels),
+  logDiagnostic: (level: "debug" | "info" | "warn" | "error", message: string, details?: unknown) =>
+    ipcRenderer.invoke("diagnostics:log" satisfies IpcChannels, level, message, details),
+
   // Per-agent (parametric). All renderers go through this namespace; no
   // agent-specific channel exists. To add a new agent, register a new
   // AgentPlugin in main — the renderer doesn't need to learn about it.

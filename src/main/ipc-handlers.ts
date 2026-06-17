@@ -46,6 +46,11 @@ import {
   type AgentWriteModelOptions,
   describeAgent,
 } from "../agents/types";
+import {
+  logRendererMessage,
+  saveDiagnosticLog,
+} from "./diagnostics";
+import type { DiagnosticLogLevel, DiagnosticLogSaveResult } from "../shared/types";
 
 /**
  * Order matters: plugins are iterated for registerRoutes / localConfig.apply
@@ -239,14 +244,25 @@ async function removeAllLocalConfigs(port: number): Promise<void> {
  * model would stay empty until the user opened the Codex panel in the UI.
  */
 async function autoSelectModelsForAllAgents(): Promise<void> {
-  if (!tokenManager) return;
+  if (!tokenManager) {
+    console.info("[Models] Skipping auto-select: no token manager");
+    return;
+  }
   const results = await Promise.allSettled(
     AGENTS.map(async (plugin) => {
       const current = getSelectedModel(plugin.id);
-      if (current && current !== "") return; // already selected
+      if (current && current !== "") {
+        console.info(`[Models] Auto-select skipped for ${plugin.id}: already selected ${current}`);
+        return;
+      }
       try {
+        console.info(`[Models] Auto-select fetching models for ${plugin.id}`);
         const models = await plugin.fetchModels(tokenManager!);
-        if (models.length === 0) return;
+        console.info(`[Models] Auto-select fetched ${models.length} model(s) for ${plugin.id}`);
+        if (models.length === 0) {
+          console.warn(`[Models] Auto-select found no models for ${plugin.id}`);
+          return;
+        }
         const firstModel = models[0];
         setSelectedModel(plugin.id, firstModel.id);
         setSelectedModelContextWindow(plugin.id, firstModel.contextWindow ?? null);
@@ -584,6 +600,22 @@ export function registerIpcHandlers(): void {
     return config;
   });
 
+  // --- Diagnostics handlers ---
+
+  ipcMain.handle(
+    "diagnostics:save-log" satisfies IpcChannels,
+    async (): Promise<DiagnosticLogSaveResult> => {
+      return saveDiagnosticLog();
+    },
+  );
+
+  ipcMain.handle(
+    "diagnostics:log" satisfies IpcChannels,
+    (_event, level: DiagnosticLogLevel, message: string, details?: unknown): void => {
+      logRendererMessage(level, message, details);
+    },
+  );
+
   // --- Per-agent handlers (parametric) ---
 
   ipcMain.handle("agents:list" satisfies IpcChannels, (): AgentDescriptor[] => {
@@ -593,11 +625,28 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     "agents:get-available-models" satisfies IpcChannels,
     async (_event, agentId: string) => {
-      if (!tokenManager) return [];
+      console.info(`[Models] Renderer requested models for ${agentId}`);
+      if (!tokenManager) {
+        console.warn(`[Models] Cannot fetch models for ${agentId}: not authenticated`);
+        return [];
+      }
       const plugin = getPlugin(agentId);
-      if (!plugin) return [];
+      if (!plugin) {
+        console.warn(`[Models] Cannot fetch models: unknown agent "${agentId}"`);
+        return [];
+      }
       try {
+        const startedAt = Date.now();
         const models = await plugin.fetchModels(tokenManager);
+        console.info(
+          `[Models] Fetched ${models.length} model(s) for ${agentId} in ${Date.now() - startedAt}ms` +
+            formatModelPreview(models.map((m) => m.id)),
+        );
+        if (models.length === 0) {
+          console.warn(
+            `[Models] Returning empty model list for ${agentId}; check preceding Copilot/agent filter diagnostics`,
+          );
+        }
 
         // Auto-select first model if none is currently selected for THIS
         // agent. Mirrors the legacy single-agent behaviour, scoped per
@@ -605,6 +654,7 @@ export function registerIpcHandlers(): void {
         const currentModel = getSelectedModel(agentId);
         if ((!currentModel || currentModel === "") && models.length > 0) {
           const firstModel = models[0];
+          console.info(`[Models] Auto-selecting first renderer-requested model for ${agentId}: ${firstModel.id}`);
           setSelectedModel(agentId, firstModel.id);
           setSelectedModelContextWindow(agentId, firstModel.contextWindow ?? null);
           await plugin.localConfig
@@ -627,8 +677,19 @@ export function registerIpcHandlers(): void {
           // before Copilot started reporting it for that model) gets the
           // value populated retroactively.
           const match = models.find((m) => m.id === currentModel);
-          if (match?.contextWindow) {
-            setSelectedModelContextWindow(agentId, match.contextWindow);
+          if (match) {
+            if (match.contextWindow) {
+              setSelectedModelContextWindow(agentId, match.contextWindow);
+              console.info(
+                `[Models] Refreshed cached context window for ${agentId}/${currentModel}: ${match.contextWindow}`,
+              );
+            } else {
+              console.info(`[Models] Current selection for ${agentId} is present: ${currentModel}`);
+            }
+          } else if (models.length > 0) {
+            console.warn(
+              `[Models] Current selection for ${agentId} not found in fetched list: ${currentModel}`,
+            );
           }
         }
 
@@ -801,6 +862,13 @@ export function registerIpcHandlers(): void {
     const manager = getOrCreateCodespaceManager();
     return manager.getConnections();
   });
+}
+
+function formatModelPreview(modelIds: string[]): string {
+  if (modelIds.length === 0) return "";
+  const preview = modelIds.slice(0, 8).join(", ");
+  const suffix = modelIds.length > 8 ? `, ... +${modelIds.length - 8} more` : "";
+  return `: ${preview}${suffix}`;
 }
 
 export function cleanup(): void {
