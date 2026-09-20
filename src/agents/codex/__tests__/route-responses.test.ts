@@ -137,6 +137,136 @@ describe("codex responses route", () => {
     expect(createResponseStream).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps streamed and completed messages and tool calls on the same item IDs", async () => {
+    const message = {
+      type: "message",
+      role: "assistant",
+      phase: "commentary",
+      status: "completed",
+      content: [{ type: "output_text", text: "正在检查。" }],
+      internal_chat_message_metadata_passthrough: "opaque-metadata",
+    };
+    const tool = {
+      type: "function_call",
+      name: "diagnostic_noop",
+      call_id: "call_original",
+      arguments: "{}",
+      status: "completed",
+    };
+    const events = [
+      {
+        type: "response.created",
+        response: { id: "resp_original", output: [] },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          ...message,
+          id: "message_first",
+          content: [],
+          status: "in_progress",
+        },
+      },
+      {
+        type: "response.output_text.delta",
+        output_index: 0,
+        content_index: 0,
+        item_id: "message_delta",
+        delta: "正在检查。",
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { ...message, id: "message_done" },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: {
+          ...tool,
+          id: "tool_first",
+          arguments: "",
+          status: "in_progress",
+        },
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 1,
+        item_id: "tool_delta",
+        delta: "{}",
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { ...tool, id: "tool_done" },
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_original",
+          output: [
+            { ...message, id: "message_final" },
+            { ...tool, id: "tool_final" },
+          ],
+          usage: { input_tokens: 12, output_tokens: 5 },
+        },
+      },
+    ].map((event, sequence_number) => ({ ...event, sequence_number }));
+    const bytes = new TextEncoder().encode(
+      events
+        .map(
+          (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        )
+        .join(""),
+    );
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let offset = 0; offset < bytes.length; offset += 7) {
+            controller.enqueue(bytes.slice(offset, offset + 7));
+          }
+          controller.close();
+        },
+      }),
+    );
+    const app = new Hono();
+    const createResponseStream = vi.fn().mockResolvedValue(upstream);
+    registerResponsesRoute(app, () => makeClient({ createResponseStream }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-6-astra",
+        input: "test",
+        stream: true,
+      }),
+    });
+    const actual = (await res.text())
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)));
+
+    expect(actual[2].item_id).toBe("message_first");
+    expect(actual[3].item).toEqual({ ...message, id: "message_first" });
+    expect(actual[5].item_id).toBe("tool_first");
+    expect(actual[6].item).toEqual({ ...tool, id: "tool_first" });
+    expect(actual[7].response).toEqual({
+      id: "resp_original",
+      output: [
+        { ...message, id: "message_first" },
+        { ...tool, id: "tool_first" },
+      ],
+      usage: { input_tokens: 12, output_tokens: 5 },
+    });
+    expect(actual.map((event) => event.sequence_number)).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7,
+    ]);
+    expect(actual[2].delta).toBe("正在检查。");
+    expect(createResponseStream).toHaveBeenCalledTimes(1);
+  });
+
   it("emits a synthetic response.failed SSE event when the upstream throws mid-stream setup", async () => {
     const app = new Hono();
     const createResponseStream = vi

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { stream } from "hono/streaming";
 import type { CopilotResponsesClient } from "../responses-client";
+import { createResponsesItemIdNormalizer } from "../responses-stream";
 import { CopilotUpstreamError } from "../../../copilot/upstream-error";
 import type { ResponsesRequest } from "../converter/types";
 
@@ -10,7 +11,8 @@ import type { ResponsesRequest } from "../converter/types";
  * Codex CLI calls.
  *
  * Forwarding strategy: pass the body through to Copilot's native
- * `/responses` endpoint unchanged. We don't translate to ChatCompletions
+ * `/responses` endpoint. Streamed output item IDs are normalized so Codex
+ * can reconcile deltas with completed items. We don't translate to ChatCompletions
  * because that path 400s for Responses-only models (gpt-5.5 et al.) with
  * `unsupported_api_for_model`. See `responses-client.ts` for the rationale.
  *
@@ -126,8 +128,9 @@ export function registerResponsesRoute(
         const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
         c.set("loggedInputTokens", inputEstimate);
 
-        const reader = upstream.body.getReader();
-        const decoder = new TextDecoder();
+        const reader = upstream.body
+          .pipeThrough(createResponsesItemIdNormalizer())
+          .getReader();
 
         return stream(c, async (s) => {
           c.header("Content-Type", "text/event-stream");
@@ -138,10 +141,8 @@ export function registerResponsesRoute(
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              await s.write(decoder.decode(value, { stream: true }));
+              await s.write(value);
             }
-            const tail = decoder.decode();
-            if (tail) await s.write(tail);
           } catch (error) {
             console.error("[Codex Responses Route] Stream error:", error);
           } finally {
