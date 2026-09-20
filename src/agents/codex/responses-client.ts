@@ -12,14 +12,14 @@
  *     family Codex CLI is most useful with.
  *   - Responses semantics (output_item.added, function_call, reasoning
  *     summary, sequence_number) are richer than ChatCompletions. Round-
- *     tripping them through ChatCompletions loses information; passing the
- *     bytes through unchanged preserves everything Codex CLI relies on.
+ *     tripping them through ChatCompletions loses information, so we keep
+ *     the native Responses events and payloads.
  *
  * So this client does the boring thing: take the body Codex CLI sent us,
  * forward it verbatim to `${baseUrl}/responses` with Copilot auth headers,
- * and stream the response back. The Codex route handler is a thin shim on
- * top of this — no schema validation, no body rewriting (beyond the few
- * unsupported parameters we strip up front in the route).
+ * and stream the response back. The Codex route handler normalizes unstable
+ * output item IDs in SSE events; other response payload fields are preserved.
+ * Unsupported request parameters are stripped by sanitizeBody below.
  *
  * Lives in src/agents/codex/ (not src/copilot/) so the boundary contract
  * holds: Codex-specific networking stays Codex-specific. The generic
@@ -114,8 +114,8 @@ export class CopilotResponsesClient {
 
   /**
    * Forward a streaming Responses request. The caller is responsible for
-   * piping `response.body` back to the client unchanged — we already speak
-   * SSE, no transformation needed.
+   * piping `response.body` through the Responses item ID normalizer before
+   * returning it to Codex. The upstream already speaks native Responses SSE.
    */
   async createResponseStream(body: unknown): Promise<Response> {
     const tokenBundle = await this.tokenManager.getTokenBundle();
