@@ -5,10 +5,26 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: windows-latest
+            arch: x64
+          - os: macos-15-intel
+            arch: x64
+          - os: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
@@ -20,7 +36,28 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Check TypeScript
+        run: npx tsc --noEmit
 
       - name: Run tests
         run: npm run test
+
+      - name: Build desktop distributable
+        if: runner.os != 'Linux'
+        run: npm run make -- --arch=${{ matrix.arch }}
+
+      - name: Check native desktop assets
+        if: runner.os != 'Linux'
+        run: npx electron scripts/smoke-desktop.cjs ${{ matrix.arch }}
+
+      - name: Upload desktop distributable
+        if: runner.os != 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ runner.os }}-${{ matrix.arch }}
+          path: |
+            out/make/**/*.exe
+            out/make/**/*.zip
+          if-no-files-found: error

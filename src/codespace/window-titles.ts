@@ -3,11 +3,12 @@ import { execFile as execFileCb } from "node:child_process";
 export type WindowTitleRunner = (
   cmd: string,
   args: string[],
+  options?: { timeout?: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
-const defaultRunner: WindowTitleRunner = (cmd, args) =>
+const defaultRunner: WindowTitleRunner = (cmd, args, options) =>
   new Promise((resolve, reject) => {
-    execFileCb(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFileCb(cmd, args, { ...options, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(error);
         return;
@@ -58,6 +59,24 @@ $cb = [WinEnum+EnumDelegate]{
 if ($titles.Count -eq 0) { '[]' } else { $titles | ConvertTo-Json -Compress }
 `.trim();
 
+// JXA returns JSON so commas, quotes and Unicode in titles survive unchanged.
+// Query running processes only; this must never launch VS Code itself.
+const MAC_WINDOW_ENUM_JXA = `
+var systemEvents = Application("System Events");
+var editors = systemEvents.applicationProcesses.whose({
+  _or: [
+    { bundleIdentifier: "com.microsoft.VSCode" },
+    { bundleIdentifier: "com.microsoft.VSCodeInsiders" },
+    { bundleIdentifier: "com.visualstudio.code.oss" }
+  ]
+})();
+var titles = [];
+for (var i = 0; i < editors.length; i++) {
+  titles = titles.concat(editors[i].windows.name());
+}
+JSON.stringify(titles);
+`.trim();
+
 export function parseWindowTitles(stdout: string): string[] {
   const trimmed = stdout.trim();
   if (!trimmed) return [];
@@ -75,14 +94,26 @@ export function parseWindowTitles(stdout: string): string[] {
 }
 
 /**
- * Returns visible top-level window titles. Currently Windows-only — on
- * other platforms returns []. macOS/Linux can be added later via AppleScript
- * / wmctrl if needed.
+ * Windows enumerates visible top-level windows; macOS enumerates VS Code
+ * windows through System Events (requires Automation/Accessibility access).
+ * Other platforms return [].
  */
 export async function listWindowTitles(
   platform: NodeJS.Platform = process.platform,
   runner: WindowTitleRunner = defaultRunner,
 ): Promise<string[]> {
+  if (platform === "darwin") {
+    // Let permission errors/timeouts reach the detector so it can distinguish
+    // an observation failure from the user closing all VS Code windows.
+    const { stdout } = await runner("/usr/bin/osascript", [
+      "-l", "JavaScript", "-e", MAC_WINDOW_ENUM_JXA,
+    ], { timeout: 5000 });
+    const titles: unknown = JSON.parse(stdout.trim());
+    if (!Array.isArray(titles) || !titles.every((title) => typeof title === "string")) {
+      throw new Error("Unexpected macOS window-title output");
+    }
+    return titles;
+  }
   if (platform !== "win32") return [];
   try {
     const { stdout } = await runner("powershell.exe", [

@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { registerIpcHandlers, cleanup } from "./ipc-handlers";
 import { initializeDiagnostics } from "./diagnostics";
 import { getAutoStart } from "../store/app-store";
+import { configureMacPath, getRuntimeIconPath } from "./platform";
 
 // Handle Squirrel events for Windows installer (only when installed via Squirrel).
 // IMPORTANT: this MUST run before the single-instance lock check below — when
@@ -81,17 +82,15 @@ declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
 function getIconPath(): string {
-  // In production (packaged), resources are in the app's resources directory
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "icon.ico");
-  }
-  // In development, use the project root
-  return path.join(__dirname, "../../assets/icon.ico");
+  return getRuntimeIconPath(process.platform, app.isPackaged, process.resourcesPath, app.getAppPath());
 }
 
 function createTray(): void {
   const iconPath = getIconPath();
-  const icon = nativeImage.createFromPath(iconPath);
+  let icon = nativeImage.createFromPath(iconPath);
+  if (process.platform === "darwin" && !icon.isEmpty()) {
+    icon = icon.resize({ width: 18, height: 18 });
+  }
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   tray.setToolTip("Agent Maestro Desktop");
 
@@ -141,8 +140,8 @@ function createWindow(): void {
     },
   });
 
-  // Remove menu bar completely
-  mainWindow.setMenu(null);
+  // macOS uses the application menu for Cmd+Q and standard editing shortcuts.
+  if (process.platform !== "darwin") mainWindow.setMenu(null);
 
   console.log("[Main] Window created, loading content...");
 
@@ -208,6 +207,16 @@ function bootApp(): void {
   app.whenReady().then(() => {
     console.log("[Main] App ready");
 
+    configureMacPath();
+    if (process.platform === "darwin") {
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: "appMenu" },
+        { role: "editMenu" },
+        { role: "viewMenu" },
+        { role: "windowMenu" },
+      ]));
+    }
+
     // Register IPC handlers before creating window
     registerIpcHandlers();
 
@@ -251,7 +260,9 @@ function bootApp(): void {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     } else {
+      if (mainWindow?.isMinimized()) mainWindow.restore();
       mainWindow?.show();
+      mainWindow?.focus();
     }
   });
 

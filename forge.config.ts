@@ -30,7 +30,11 @@ const config: ForgeConfig = {
     asar: true,
     name: "Agent Maestro Desktop",
     icon: "assets/icons/icon",
-    extraResource: ["assets/icons/icon.ico"],
+    extraResource: ["assets/icons/icon.ico", "assets/icons/128x128.png"],
+    appBundleId: "com.studentwan.agent-maestro-desktop",
+    extendInfo: {
+      NSAppleEventsUsageDescription: "Detect open VS Code Codespaces windows to connect them to your local proxy.",
+    },
     afterCopy: removeTypeModule,
   },
   makers: [

@@ -8,11 +8,12 @@ on:
         required: true
         default: 'v1.0.0'
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-release:
+  build-windows:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -43,7 +44,13 @@ jobs:
         shell: pwsh
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Check TypeScript
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
 
       - name: Build Electron app (Windows)
         run: npm run make
@@ -55,11 +62,86 @@ jobs:
           Rename-Item $exe.FullName -NewName $newName
         shell: pwsh
 
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: out/make/squirrel.windows/x64/AgentMaestroDesktop-${{ github.event.inputs.version }}.exe
+          if-no-files-found: error
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+          - os: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Stamp release version into package.json
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: npm version "${RELEASE_VERSION#v}" --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check TypeScript
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Electron app (macOS)
+        run: npm run make -- --arch=${{ matrix.arch }}
+
+      - name: Check native desktop assets
+        run: npx electron scripts/smoke-desktop.cjs ${{ matrix.arch }}
+
+      - name: Rename macOS archive
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p release-artifacts
+          cp out/make/zip/darwin/"$TARGET_ARCH"/*.zip "release-artifacts/AgentMaestroDesktop-${RELEASE_VERSION}-macOS-${TARGET_ARCH}.zip"
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: release-artifacts/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.event.inputs.version }}
           tag_name: ${{ github.event.inputs.version }}
-          files: out/make/squirrel.windows/x64/AgentMaestroDesktop-${{ github.event.inputs.version }}.exe
+          files: release-artifacts/*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

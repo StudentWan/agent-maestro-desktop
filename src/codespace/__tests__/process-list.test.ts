@@ -85,15 +85,17 @@ describe("listProcesses", () => {
     expect(calls[0].args.join(" ")).toContain("Win32_Process");
   });
 
-  it("uses ps on darwin/linux", async () => {
+  it.each(["darwin", "linux"] as const)("uses ps on %s without truncating macOS commands", async (platform) => {
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const runner: ProcessRunner = async (cmd, args) => {
       calls.push({ cmd, args });
       return { stdout: "  77 some/cmd\n", stderr: "" };
     };
-    const out = await listProcesses("darwin", runner);
+    const out = await listProcesses(platform, runner);
     expect(out).toEqual([{ pid: 77, command: "some/cmd" }]);
     expect(calls[0].cmd).toBe("ps");
-    expect(calls[0].args).toEqual(["-A", "-o", "pid=,command="]);
+    expect(calls[0].args).toEqual(platform === "darwin"
+      ? ["-A", "-ww", "-o", "pid=,command="]
+      : ["-A", "-o", "pid=,command="]);
   });
 });

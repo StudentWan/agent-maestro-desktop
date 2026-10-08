@@ -75,6 +75,10 @@ export async function listProcesses(
     ]);
     return parseWindowsProcesses(stdout);
   }
-  const { stdout } = await runner("ps", ["-A", "-o", "pid=,command="]);
+  // BSD ps truncates long commands without -ww, hiding Codespaces arguments.
+  const args = platform === "darwin"
+    ? ["-A", "-ww", "-o", "pid=,command="]
+    : ["-A", "-o", "pid=,command="];
+  const { stdout } = await runner("ps", args);
   return parseUnixProcesses(stdout);
 }
