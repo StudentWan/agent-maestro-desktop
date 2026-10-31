@@ -63,3 +63,54 @@ jobs:
           files: out/make/squirrel.windows/x64/AgentMaestroDesktop-${{ github.event.inputs.version }}.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # macOS build. Must run on a macOS runner: darwin packaging/signing cannot be
+  # produced on windows-latest, and `macos-latest` is the only image that ships
+  # the toolchain Forge needs for `.app` bundles.
+  #
+  # `needs:` serialises the two jobs so the Windows job creates the release
+  # first and this one only appends assets — running them concurrently makes
+  # both jobs race to create the same tag (occasional HTTP 422 from the
+  # releases API).
+  build-macos:
+    needs: build-and-release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Same version stamping as the Windows job — see the long comment there.
+      # Without it the Info.plist / status bar would report 1.0.0 instead of
+      # the release tag.
+      - name: Stamp release version into package.json
+        run: |
+          semver="${{ github.event.inputs.version }}"
+          npm version "${semver#v}" --no-git-tag-version --allow-same-version
+          echo "package.json version set to ${semver#v}"
+
+      - name: Install dependencies
+        run: npm install
+
+      # `--arch=universal` builds both arm64 and x86_64 and merges them with
+      # @electron/universal (already a dependency of @electron/packager), so
+      # Intel Macs are covered even though the runner itself is arm64.
+      #
+      # `MakerZIP` is already registered for darwin in forge.config.ts, so the
+      # artifact below is a zip containing "Agent Maestro Desktop.app".
+      - name: Build Electron app (macOS, universal)
+        run: npx electron-forge make --platform=darwin --arch=universal
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: out/make/zip/darwin/universal/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
