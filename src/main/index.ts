@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu, Tray, nativeImage } from "electron";
+import fs from "node:fs";
 import path from "path";
 import { spawn } from "node:child_process";
 import { registerIpcHandlers, cleanup } from "./ipc-handlers";
@@ -81,12 +82,38 @@ declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
 function getIconPath(): string {
+  // macOS cannot render .ico in the menu bar (nativeImage returns an empty
+  // image), so the tray gets the equivalent PNG pair instead.
+  const fileName = process.platform === "darwin" ? "tray.png" : "icon.ico";
   // In production (packaged), resources are in the app's resources directory
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, "icon.ico");
+    return path.join(process.resourcesPath, fileName);
   }
   // In development, use the project root
-  return path.join(__dirname, "../../assets/icon.ico");
+  return path.join(__dirname, `../../assets/icons/${fileName}`);
+}
+
+/**
+ * macOS GUI apps are started by launchd, not by the user's shell, so they
+ * inherit the bare PATH `/usr/bin:/bin:/usr/sbin:/sbin`. Homebrew's bin dirs —
+ * where `gh` lives — are missing, which makes the codespace features report
+ * "gh CLI not installed" even though it works in Terminal.
+ */
+function augmentPathForGuiLaunch(): void {
+  if (process.platform !== "darwin") return;
+
+  const inherited = (process.env.PATH ?? "").split(":").filter(Boolean);
+  const candidates =
+    process.arch === "arm64"
+      ? ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/opt/local/bin"]
+      : ["/usr/local/bin", "/opt/homebrew/bin", "/usr/local/sbin", "/opt/local/bin"];
+
+  const additions = candidates.filter(
+    (dir) => !inherited.includes(dir) && fs.existsSync(dir),
+  );
+  if (additions.length === 0) return;
+
+  process.env.PATH = [...additions, ...inherited].join(":");
 }
 
 function createTray(): void {
@@ -141,8 +168,20 @@ function createWindow(): void {
     },
   });
 
-  // Remove menu bar completely
-  mainWindow.setMenu(null);
+  // Remove menu bar completely. On macOS the menu bar is global and dropping it
+  // also removes the ⌘Q / ⌘C / ⌘V / ⌘W key equivalents, so install a minimal
+  // role-based menu there instead.
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: "appMenu" },
+        { role: "editMenu" },
+        { role: "windowMenu" },
+      ]),
+    );
+  } else {
+    mainWindow.setMenu(null);
+  }
 
   console.log("[Main] Window created, loading content...");
 
@@ -181,6 +220,9 @@ function createWindow(): void {
 // helper instance would also start the proxy server, create a tray icon,
 // open the main window, and possibly race with Update.exe writing shortcuts.
 function bootApp(): void {
+  // Must run before anything spawns a child process (gh, ssh, …).
+  augmentPathForGuiLaunch();
+
   const diagnosticLogPath = initializeDiagnostics();
   console.log("[Main] Diagnostic logging enabled:", diagnosticLogPath);
 

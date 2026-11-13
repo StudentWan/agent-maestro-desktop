@@ -30,7 +30,12 @@ const config: ForgeConfig = {
     asar: true,
     name: "Agent Maestro Desktop",
     icon: "assets/icons/icon",
-    extraResource: ["assets/icons/icon.ico"],
+    // Tray icons: .ico for Windows, PNG pair for the macOS menu bar.
+    extraResource: [
+      "assets/icons/icon.ico",
+      "assets/icons/tray.png",
+      "assets/icons/tray@2x.png",
+    ],
     afterCopy: removeTypeModule,
   },
   makers: [
