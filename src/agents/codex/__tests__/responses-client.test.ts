@@ -163,4 +163,30 @@ describe("CopilotResponsesClient", () => {
       client.createResponse({ model: "nope", input: "hi" }),
     ).rejects.toThrow(/Copilot Responses API error \(404\)/);
   });
+
+  it("drops tool_search and flattens namespace tools for non-OpenAI models like gemini-4-hydrogen", async () => {
+    mockFetch.mockResolvedValueOnce(createFetchResponse({ id: "resp_gemini" }));
+
+    await client.createResponse({
+      model: "gemini-4-hydrogen",
+      input: "hi",
+      client_metadata: { x: "1" },
+      tools: [
+        { type: "function", name: "shell" },
+        { type: "tool_search" },
+        {
+          type: "namespace",
+          name: "mcp",
+          tools: [{ type: "function", name: "mcp__read" }],
+        },
+      ],
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body).not.toHaveProperty("client_metadata");
+    expect(body.tools).toEqual([
+      { type: "function", name: "shell" },
+      { type: "function", name: "mcp__read" },
+    ]);
+  });
 });

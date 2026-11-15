@@ -35,6 +35,11 @@ export interface AgentModelInfo {
    * may not carry it.
    */
   contextWindow?: number;
+  /**
+   * Supported reasoning effort levels reported by Copilot `/models`
+   * (`capabilities.supports.reasoning_effort`), if any.
+   */
+  reasoningEfforts?: string[];
 }
 
 /**

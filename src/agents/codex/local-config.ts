@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { parse, stringify } from "smol-toml";
-import type { AgentLocalConfigSnippet, AgentWriteModelOptions } from "../types";
+import type { AgentLocalConfigSnippet, AgentModelInfo, AgentWriteModelOptions } from "../types";
 
 /**
  * Local writer for `~/.codex/config.toml`.
@@ -37,6 +37,7 @@ import type { AgentLocalConfigSnippet, AgentWriteModelOptions } from "../types";
 
 const CODEX_DIR = path.join(os.homedir(), ".codex");
 const CONFIG_PATH = path.join(CODEX_DIR, "config.toml");
+const MODEL_CATALOG_PATH = path.join(CODEX_DIR, "agent-maestro-models.json");
 
 const PROVIDER_NAME = "agent-maestro";
 const PROVIDER_DISPLAY = "Agent Maestro Desktop";
@@ -45,6 +46,7 @@ interface CodexConfig {
   model?: string;
   model_provider?: string;
   model_context_window?: number;
+  model_catalog_json?: string;
   model_providers?: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
 }
@@ -176,6 +178,9 @@ function stripProvider(existing: CodexConfig): CodexConfig | null {
   if (next.model_provider === PROVIDER_NAME) {
     delete next.model_provider;
   }
+  if (next.model_catalog_json === MODEL_CATALOG_PATH) {
+    delete next.model_catalog_json;
+  }
   if (next.model_providers && PROVIDER_NAME in next.model_providers) {
     const { [PROVIDER_NAME]: _ours, ...rest } = next.model_providers;
     if (Object.keys(rest).length === 0) {
@@ -246,6 +251,178 @@ export async function writeModelToCodexConfig(
     `[CodexConfig] Model set to: ${modelId}${
       typeof ctx === "number" ? `, model_context_window=${ctx}` : ""
     }`,
+  );
+}
+
+const DEFAULT_REASONING_DESCRIPTIONS: Record<string, string> = {
+  low: "Fast responses with lighter reasoning",
+  medium: "Balances speed and reasoning depth for everyday tasks",
+  high: "Maximizes reasoning depth for complex problems",
+  xhigh: "Extra high reasoning effort for complex problems",
+};
+
+interface CodexCatalogModelEntry {
+  slug: string;
+  display_name?: string;
+  description?: string;
+  visibility?: string;
+  supported_in_api?: boolean;
+  priority?: number;
+  context_window?: number;
+  max_context_window?: number;
+  default_reasoning_level?: string;
+  supported_reasoning_levels?: Array<{ effort: string; description: string }>;
+  [key: string]: unknown;
+}
+
+async function readCatalogSeed(filePath: string): Promise<Map<string, CodexCatalogModelEntry>> {
+  const seed = new Map<string, CodexCatalogModelEntry>();
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    const parsed = JSON.parse(raw) as { models?: unknown };
+    if (Array.isArray(parsed.models)) {
+      for (const entry of parsed.models) {
+        if (entry && typeof entry === "object" && typeof (entry as { slug?: unknown }).slug === "string") {
+          const typed = entry as CodexCatalogModelEntry;
+          seed.set(typed.slug.toLowerCase(), typed);
+        }
+      }
+    }
+  } catch {
+    // Missing or unreadable seed file is fine
+  }
+  return seed;
+}
+
+function buildCodexCatalogEntry(
+  model: AgentModelInfo,
+  priority: number,
+  seed: CodexCatalogModelEntry | undefined,
+  fallbackTemplate: CodexCatalogModelEntry | undefined,
+): CodexCatalogModelEntry {
+  const contextWindow = model.contextWindow ?? seed?.context_window ?? 128000;
+  const reasoningEfforts = model.reasoningEfforts?.filter(
+    (e) => e === "low" || e === "medium" || e === "high" || e === "xhigh",
+  );
+  const supportedReasoningLevels =
+    reasoningEfforts && reasoningEfforts.length > 0
+      ? reasoningEfforts.map((effort) => ({
+          effort,
+          description: DEFAULT_REASONING_DESCRIPTIONS[effort] ?? `${effort} reasoning effort`,
+        }))
+      : seed?.supported_reasoning_levels ??
+        fallbackTemplate?.supported_reasoning_levels ?? [
+          { effort: "low", description: DEFAULT_REASONING_DESCRIPTIONS.low },
+          { effort: "medium", description: DEFAULT_REASONING_DESCRIPTIONS.medium },
+          { effort: "high", description: DEFAULT_REASONING_DESCRIPTIONS.high },
+        ];
+
+  const defaultReasoning =
+    seed?.default_reasoning_level ??
+    (supportedReasoningLevels.some((r) => r.effort === "high")
+      ? "high"
+      : supportedReasoningLevels[0]?.effort ?? "medium");
+
+  const base: CodexCatalogModelEntry = seed
+    ? { ...seed }
+    : fallbackTemplate
+      ? { ...fallbackTemplate }
+      : {
+          slug: model.id,
+          prefer_websockets: false,
+          support_verbosity: true,
+          default_verbosity: "low",
+          input_modalities: ["text", "image"],
+          supports_parallel_tool_calls: true,
+          shell_type: "shell_command",
+          minimal_client_version: "0.124.0",
+        };
+
+  const isOpenAINative =
+    model.id.toLowerCase().startsWith("gpt-") ||
+    model.id.toLowerCase().startsWith("openai/") ||
+    model.id.toLowerCase().startsWith("o1") ||
+    model.id.toLowerCase().startsWith("o3") ||
+    model.id.toLowerCase().startsWith("o4") ||
+    model.id.toLowerCase().startsWith("o5") ||
+    model.id.toLowerCase().includes("codex");
+
+  return {
+    ...base,
+    slug: model.id,
+    display_name: model.name || seed?.display_name || model.id,
+    description: seed?.description || `${model.name || model.id} via GitHub Copilot`,
+    visibility: "list",
+    supported_in_api: true,
+    priority,
+    context_window: contextWindow,
+    max_context_window: contextWindow,
+    default_reasoning_level: defaultReasoning,
+    supported_reasoning_levels: supportedReasoningLevels,
+    supports_search_tool: isOpenAINative ? (base.supports_search_tool ?? true) : false,
+  };
+}
+
+/**
+ * Sync the discovered Copilot models into a Codex `model_catalog_json` file
+ * (`~/.codex/agent-maestro-models.json`) and point `model_catalog_json` in
+ * `~/.codex/config.toml` to it.
+ *
+ * Codex App reads its model picker list from `model_catalog_json` when
+ * configured rather than polling `/codex/v1/models`, so keeping this file
+ * synchronized ensures newly discovered models (Gemini, Grok, MAI-Code, etc.)
+ * appear in Codex App automatically.
+ */
+export async function syncCodexModelCatalog(
+  models: AgentModelInfo[],
+  options?: { configPath?: string; catalogPath?: string },
+): Promise<void> {
+  if (models.length === 0) return;
+
+  const configPath = options?.configPath ?? CONFIG_PATH;
+  const catalogPath = options?.catalogPath ?? MODEL_CATALOG_PATH;
+
+  const rawConfig = await readFileOrEmpty(configPath);
+  const existingConfig = parseExisting(rawConfig);
+
+  // Seed from any existing catalog (user's custom-models.json or our previous
+  // catalog) so we preserve rich Codex metadata like base_instructions.
+  const seed = new Map<string, CodexCatalogModelEntry>();
+  if (
+    typeof existingConfig.model_catalog_json === "string" &&
+    existingConfig.model_catalog_json !== catalogPath
+  ) {
+    for (const [k, v] of await readCatalogSeed(existingConfig.model_catalog_json)) {
+      seed.set(k, v);
+    }
+  }
+  for (const [k, v] of await readCatalogSeed(catalogPath)) {
+    if (!seed.has(k)) {
+      seed.set(k, v);
+    }
+  }
+
+  const fallbackTemplate = Array.from(seed.values()).find((m) => m.visibility === "list") ??
+    Array.from(seed.values())[0];
+
+  const catalogModels = models.map((model, index) =>
+    buildCodexCatalogEntry(
+      model,
+      index,
+      seed.get(model.id.toLowerCase()),
+      fallbackTemplate,
+    ),
+  );
+
+  await writeFileAtomic(catalogPath, JSON.stringify({ models: catalogModels }, null, 2));
+
+  if (existingConfig.model_catalog_json !== catalogPath) {
+    existingConfig.model_catalog_json = catalogPath;
+    await writeFileAtomic(configPath, stringifyCodexConfig(existingConfig));
+  }
+
+  console.log(
+    `[CodexConfig] Synced ${catalogModels.length} model(s) to ${catalogPath}`,
   );
 }
 

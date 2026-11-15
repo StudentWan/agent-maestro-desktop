@@ -410,4 +410,123 @@ describe("codex responses route", () => {
     expect(text).toContain('"code":"server_error"');
     expect(text).not.toContain("context_length_exceeded");
   });
+
+  it("routes non-Responses models (e.g. gemini-4-hydrogen, grok-4.7) via ChatCompletions converter", async () => {
+    const app = new Hono();
+    const createResponse = vi.fn();
+    const chatCompletion = vi.fn().mockResolvedValue({
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1700000000,
+      model: "gemini-4-hydrogen",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Hello from Gemini!" },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    });
+
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({ createResponse }),
+      chat: { chatCompletion, chatCompletionStream: vi.fn() },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-4-hydrogen",
+        input: "hi",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(createResponse).not.toHaveBeenCalled();
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    const body = await res.json();
+    expect(body.object).toBe("response");
+    expect(body.model).toBe("gemini-4-hydrogen");
+    expect(body.output[0].content[0].text).toBe("Hello from Gemini!");
+    expect(body.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 4,
+      total_tokens: 14,
+    });
+  });
+
+  it("falls back to ChatCompletions when /responses rejects a model with unsupported_api_for_model", async () => {
+    const app = new Hono();
+    const createResponse = vi.fn().mockRejectedValue(
+      new CopilotUpstreamError(
+        "Copilot Responses API error (400)",
+        400,
+        '{"error":{"code":"unsupported_api_for_model","message":"Model is not accessible via the /responses endpoint"}}',
+      ),
+    );
+    const chatCompletion = vi.fn().mockResolvedValue({
+      id: "chatcmpl-fallback",
+      object: "chat.completion",
+      created: 1700000000,
+      model: "gpt-5-legacy-chat-only",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Fallback worked" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({ createResponse }),
+      chat: { chatCompletion, chatCompletionStream: vi.fn() },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5-legacy-chat-only",
+        input: "hi",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(createResponse).toHaveBeenCalledTimes(1);
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    const body = await res.json();
+    expect(body.output[0].content[0].text).toBe("Fallback worked");
+  });
+
+  it("does NOT fall back to ChatCompletions on upstream_request_rejected (surfaces error directly)", async () => {
+    const app = new Hono();
+    const createResponse = vi.fn().mockRejectedValue(
+      new CopilotUpstreamError(
+        "Copilot Responses API error (400)",
+        400,
+        '{"error":{"message":"The model provider rejected the request.","code":"upstream_request_rejected"}}',
+      ),
+    );
+    const chatCompletion = vi.fn();
+
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({ createResponse }),
+      chat: { chatCompletion, chatCompletionStream: vi.fn() },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5-rejected",
+        input: "hi",
+      }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(chatCompletion).not.toHaveBeenCalled();
+  });
 });

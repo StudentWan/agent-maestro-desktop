@@ -15,8 +15,12 @@ interface CopilotModelEntry {
   id: string;
   name: string;
   version: string;
+  supported_endpoints?: string[];
   capabilities?: {
     type?: string;
+    supports?: {
+      reasoning_effort?: string[];
+    };
     limits?: {
       /**
        * Max prompt tokens the model accepts. Read by the Codex local/
@@ -28,6 +32,14 @@ interface CopilotModelEntry {
     };
   };
 }
+
+/**
+ * Cache of modelId (lowercased) -> supported endpoints reported by Copilot's
+ * `/models` catalog, plus runtime overrides when `/responses` rejects a model
+ * with `unsupported_api_for_model`.
+ */
+const modelEndpointsCache = new Map<string, string[]>();
+const chatCompletionsOnlyOverrides = new Set<string>();
 
 /**
  * Fetch available models from the Copilot API and filter for those that
@@ -83,12 +95,20 @@ export async function fetchAvailableCodexModels(
   );
 
   const codexModels = allModels
-    .filter((m) => isSupportedCodexModel(m.id))
-    .map((m) => ({
-      id: m.id,
-      name: m.name || m.id,
-      contextWindow: m.capabilities?.limits?.max_prompt_tokens,
-    }));
+    .filter((m) => isSupportedCodexModel(m))
+    .map((m) => {
+      if (Array.isArray(m.supported_endpoints) && m.supported_endpoints.length > 0) {
+        modelEndpointsCache.set(m.id.toLowerCase(), m.supported_endpoints);
+      }
+      return {
+        id: m.id,
+        name: m.name || m.id,
+        contextWindow: m.capabilities?.limits?.max_prompt_tokens,
+        reasoningEfforts: Array.isArray(m.capabilities?.supports?.reasoning_effort)
+          ? m.capabilities.supports.reasoning_effort
+          : undefined,
+      };
+    });
 
   console.info(
     `[Codex Models] Filtered ${codexModels.length} Codex model(s) from ${allModels.length} Copilot model(s)` +
@@ -130,19 +150,56 @@ function resolveCopilotModelsUrl(baseUrl: string): string {
 }
 
 /**
- * Match GPT-family / Codex-family model ids served by Copilot. Anthropic
- * Claude models, Gemini, and any other non-OpenAI families are filtered
- * out — they don't speak Responses semantics natively, so listing them
- * here would let users mis-target a model that won't behave.
+ * Determine whether a Copilot model can be driven by Codex CLI / Codex App.
+ *
+ * We include all chat/completion models (GPT, o-series, Codex, Gemini, Grok,
+ * MAI-Code, Claude, etc.) and exclude non-chat models such as embeddings.
+ * Models that don't speak Copilot's native `/responses` endpoint are routed
+ * through the Responses <-> ChatCompletions converter in `routes/responses.ts`.
  */
-export function isSupportedCodexModel(modelId: string): boolean {
-  const id = modelId.toLowerCase();
-  if (id.includes("claude")) return false;
-  if (id.includes("gemini")) return false;
+export function isSupportedCodexModel(modelOrId: string | CopilotModelEntry): boolean {
+  const id = (typeof modelOrId === "string" ? modelOrId : modelOrId.id).toLowerCase();
+  if (!id || id.includes("embedding")) return false;
+  // Grok's Copilot /responses backend rejects Codex App's tool/namespace payloads
+  // and is not accessible via /chat/completions, so exclude it from Codex.
   if (id.includes("grok")) return false;
-  if (id.includes("mistral") || id.includes("ministral")) return false;
+
+  if (typeof modelOrId !== "string") {
+    const capType = modelOrId.capabilities?.type?.toLowerCase();
+    if (capType && capType !== "chat") return false;
+
+    const endpoints = modelOrId.supported_endpoints;
+    if (Array.isArray(endpoints) && endpoints.length > 0) {
+      return endpoints.includes("/responses") || endpoints.includes("/chat/completions");
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Decide whether a model should be forwarded to Copilot's native `/responses`
+ * endpoint or translated to `/chat/completions`.
+ */
+export function prefersResponsesEndpoint(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  if (chatCompletionsOnlyOverrides.has(id)) {
+    return false;
+  }
+
+  const cached = modelEndpointsCache.get(id);
+  if (cached && cached.length > 0) {
+    if (cached.includes("/responses")) return true;
+    if (cached.includes("/chat/completions")) return false;
+  }
+
+  // Heuristic fallback when `/models` hasn't been fetched yet or omitted
+  // `supported_endpoints`: OpenAI Responses-native families go to `/responses`;
+  // other families (Gemini, Grok, Claude, MAI-Code, Mistral, etc.) go straight
+  // to `/chat/completions` via the converter.
   return (
-    id.startsWith("gpt-") ||
+    id.startsWith("gpt-5") ||
+    id.startsWith("gpt-6") ||
     id.startsWith("openai/") ||
     id.startsWith("o1") ||
     id.startsWith("o3") ||
@@ -150,6 +207,20 @@ export function isSupportedCodexModel(modelId: string): boolean {
     id.startsWith("o5") ||
     id.includes("codex")
   );
+}
+
+/**
+ * Record at runtime that a model was rejected by `/responses` as
+ * unsupported so subsequent requests go directly to `/chat/completions`.
+ */
+export function markModelRequiresChatCompletions(modelId: string): void {
+  chatCompletionsOnlyOverrides.add(modelId.toLowerCase());
+}
+
+/** Test-only helper to clear cached endpoint metadata between test cases. */
+export function resetCodexModelRoutingCache(): void {
+  modelEndpointsCache.clear();
+  chatCompletionsOnlyOverrides.clear();
 }
 
 function parseCopilotModelsResponse(text: string): CopilotModelEntry[] {
