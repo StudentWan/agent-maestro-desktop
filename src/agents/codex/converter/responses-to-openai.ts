@@ -173,7 +173,7 @@ function appendItem(
     case "function_call_output": {
       messages.push({
         role: "tool",
-        content: item.output ?? "",
+        content: stringifyToolOutput(item.output),
         tool_call_id: item.call_id,
       });
       return;
@@ -206,6 +206,21 @@ function appendItem(
   }
 }
 
+function stringifyToolOutput(
+  output: string | ResponsesContentPart[] | Record<string, unknown> | undefined | null,
+): string {
+  if (output === undefined || output === null) return "";
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    const text = stringifyMessageContent(output);
+    return text || JSON.stringify(output);
+  }
+  if (typeof output === "object") {
+    return JSON.stringify(output);
+  }
+  return String(output);
+}
+
 /**
  * Flatten a `content` field (string or content-parts array) into a single
  * string for the ChatCompletions side. Copilot's `chat/completions` accepts
@@ -220,12 +235,19 @@ function stringifyMessageContent(
 
   let out = "";
   for (const part of content) {
+    if (typeof part === "string") {
+      out += part;
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
     switch (part.type) {
       case "input_text":
       case "output_text":
-        out += part.text;
+      case "text":
+        out += part.text ?? "";
         break;
       case "input_image":
+      case "image_url":
         // Copilot's chat completions endpoint doesn't accept inline images
         // for every model — drop with a marker so we don't silently change
         // the prompt's meaning.

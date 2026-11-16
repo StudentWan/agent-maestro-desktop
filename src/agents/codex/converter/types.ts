@@ -58,15 +58,16 @@ export interface ResponsesFunctionCallInput {
 export interface ResponsesFunctionCallOutputInput {
   type: "function_call_output";
   call_id: string;
-  output: string;
+  output: string | ResponsesContentPart[] | Record<string, unknown>;
 }
 
 export type ResponsesContentPart =
   | { type: "input_text"; text: string }
   | { type: "output_text"; text: string }
+  | { type: "text"; text: string }
   | {
-      type: "input_image";
-      image_url?: string;
+      type: "input_image" | "image_url";
+      image_url?: string | { url?: string };
       detail?: "low" | "high" | "auto";
     };
 

@@ -274,4 +274,34 @@ describe("convertResponsesToOpenAI", () => {
       },
     ]);
   });
+
+  it("stringifies multimodal array function_call_output (e.g. view_image) into string tool content", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "check screenshot" },
+        {
+          type: "function_call",
+          call_id: "call_img",
+          name: "view_image",
+          arguments: '{"path":"shot.png"}',
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_img",
+          output: [
+            { type: "input_text", text: "Loaded image: " },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages[2]).toEqual({
+      role: "tool",
+      tool_call_id: "call_img",
+      content: "Loaded image: [Image content omitted]",
+    });
+  });
 });
