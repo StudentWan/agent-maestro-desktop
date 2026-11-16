@@ -184,4 +184,94 @@ describe("convertResponsesToOpenAI", () => {
     expect(result.tools).toHaveLength(1);
     expect(result.tools?.[0].function.name).toBe("real_tool");
   });
+
+  it("groups consecutive parallel function_call items into one assistant message and drops empty assistant turns", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "check both files" },
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "exec_command",
+          arguments: '{"cmd":"ls a"}',
+        },
+        {
+          type: "function_call",
+          call_id: "call_2",
+          name: "exec_command",
+          arguments: '{"cmd":"ls b"}',
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: "a.txt",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_2",
+          output: "b.txt",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "" }],
+        },
+        { role: "user", content: "continue" },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      { role: "user", content: "check both files" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "exec_command", arguments: '{"cmd":"ls a"}' },
+          },
+          {
+            id: "call_2",
+            type: "function",
+            function: { name: "exec_command", arguments: '{"cmd":"ls b"}' },
+          },
+        ],
+      },
+      { role: "tool", content: "a.txt", tool_call_id: "call_1" },
+      { role: "tool", content: "b.txt", tool_call_id: "call_2" },
+      { role: "user", content: "continue" },
+    ]);
+  });
+
+  it("drops namespace and tool_search tools and deduplicates function names for ChatCompletions", () => {
+    const req = {
+      model: "gemini-4-hydrogen",
+      input: "hi",
+      tools: [
+        { type: "tool_search" },
+        {
+          type: "namespace",
+          name: "mcp",
+          tools: [{ type: "function", name: "mcp__read", description: "read" }],
+        },
+        { type: "function", name: "exec_command", description: "run" },
+        { type: "function", name: "exec_command", description: "dup" },
+      ],
+    } as unknown as ResponsesRequest;
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "exec_command",
+          description: "run",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ]);
+  });
 });

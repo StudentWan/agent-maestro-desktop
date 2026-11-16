@@ -39,6 +39,7 @@ interface CopilotModelEntry {
  * with `unsupported_api_for_model`.
  */
 const modelEndpointsCache = new Map<string, string[]>();
+const modelReasoningEffortsCache = new Map<string, string[]>();
 const chatCompletionsOnlyOverrides = new Set<string>();
 
 /**
@@ -100,13 +101,17 @@ export async function fetchAvailableCodexModels(
       if (Array.isArray(m.supported_endpoints) && m.supported_endpoints.length > 0) {
         modelEndpointsCache.set(m.id.toLowerCase(), m.supported_endpoints);
       }
+      const reasoningEfforts = Array.isArray(m.capabilities?.supports?.reasoning_effort)
+        ? m.capabilities.supports.reasoning_effort
+        : undefined;
+      if (reasoningEfforts && reasoningEfforts.length > 0) {
+        modelReasoningEffortsCache.set(m.id.toLowerCase(), reasoningEfforts);
+      }
       return {
         id: m.id,
         name: m.name || m.id,
         contextWindow: m.capabilities?.limits?.max_prompt_tokens,
-        reasoningEfforts: Array.isArray(m.capabilities?.supports?.reasoning_effort)
-          ? m.capabilities.supports.reasoning_effort
-          : undefined,
+        reasoningEfforts,
       };
     });
 
@@ -209,6 +214,47 @@ export function prefersResponsesEndpoint(modelId: string): boolean {
   );
 }
 
+const REASONING_EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export function getSupportedReasoningEfforts(modelId: string): string[] | undefined {
+  return modelReasoningEffortsCache.get(modelId.toLowerCase());
+}
+
+export function resolveCodexReasoningEffort(
+  modelId: string,
+  requestedEffort: string | undefined,
+): string | undefined {
+  if (!requestedEffort) return undefined;
+  const supported = modelReasoningEffortsCache.get(modelId.toLowerCase());
+  if (!supported || supported.length === 0) {
+    return undefined;
+  }
+  const normalized = requestedEffort.toLowerCase();
+  if (supported.includes(normalized)) {
+    return normalized;
+  }
+
+  const targetRank = REASONING_EFFORT_ORDER.indexOf(
+    normalized as (typeof REASONING_EFFORT_ORDER)[number],
+  );
+  if (targetRank < 0) return supported[0];
+
+  let best = supported[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of supported) {
+    const rank = REASONING_EFFORT_ORDER.indexOf(
+      candidate as (typeof REASONING_EFFORT_ORDER)[number],
+    );
+    if (rank < 0) continue;
+    const distance = Math.abs(rank - targetRank);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 /**
  * Record at runtime that a model was rejected by `/responses` as
  * unsupported so subsequent requests go directly to `/chat/completions`.
@@ -220,6 +266,7 @@ export function markModelRequiresChatCompletions(modelId: string): void {
 /** Test-only helper to clear cached endpoint metadata between test cases. */
 export function resetCodexModelRoutingCache(): void {
   modelEndpointsCache.clear();
+  modelReasoningEffortsCache.clear();
   chatCompletionsOnlyOverrides.clear();
 }
 

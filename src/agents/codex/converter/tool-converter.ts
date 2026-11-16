@@ -17,9 +17,11 @@ export function convertResponsesToolsToOpenAI(
   if (!tools || tools.length === 0) return undefined;
 
   const out: CopilotTool[] = [];
+  const seenNames = new Set<string>();
   for (const tool of tools) {
     if (tool.type !== "function") continue;
-    if (!tool.name) continue;
+    if (!tool.name || seenNames.has(tool.name)) continue;
+    seenNames.add(tool.name);
     out.push({
       type: "function",
       function: {

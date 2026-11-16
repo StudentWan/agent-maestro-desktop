@@ -52,6 +52,7 @@ export class ResponsesRequestError extends Error {
  */
 export function convertResponsesToOpenAI(
   request: ResponsesRequest,
+  options?: { reasoningEffort?: string },
 ): CopilotCompletionRequest {
   if (request.previous_response_id) {
     throw new ResponsesRequestError(
@@ -98,6 +99,9 @@ export function convertResponsesToOpenAI(
   }
   if (request.top_p !== undefined) {
     result.top_p = request.top_p;
+  }
+  if (options?.reasoningEffort) {
+    result.reasoning_effort = options.reasoningEffort;
   }
 
   const tools = convertResponsesToolsToOpenAI(request.tools);
@@ -150,15 +154,19 @@ function appendItem(
           arguments: item.arguments ?? "",
         },
       };
-      // Tool-call items live as their own assistant turn in the Responses
-      // wire format. ChatCompletions requires the calls to be attached to
-      // an assistant message — emit one with empty content per turn so we
-      // don't accidentally merge separate tool-call rounds.
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [call],
-      });
+      // Group consecutive function_call items from the same turn into a
+      // single assistant message with `tool_calls`, matching OpenAI and
+      // Gemini ChatCompletions turn-alternation expectations.
+      const prev = messages[messages.length - 1];
+      if (prev && prev.role === "assistant" && Array.isArray(prev.tool_calls)) {
+        prev.tool_calls.push(call);
+      } else {
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: [call],
+        });
+      }
       return;
     }
 
@@ -176,6 +184,11 @@ function appendItem(
       // Plain message: role + content (string or content parts array).
       const role = item.role;
       const text = stringifyMessageContent(item.content);
+      // Skip empty assistant text items left behind by empty/aborted turns;
+      // Gemini ChatCompletions rejects or stalls on empty model turns.
+      if (role === "assistant" && text === "") {
+        return;
+      }
       // System / developer roles in Responses both map to the OpenAI
       // "system" role since Copilot's ChatCompletions doesn't model
       // "developer" separately.

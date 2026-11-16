@@ -4,6 +4,7 @@ import {
   isSupportedCodexModel,
   prefersResponsesEndpoint,
   resetCodexModelRoutingCache,
+  resolveCodexReasoningEffort,
 } from "../models";
 import type { TokenManager } from "../../../copilot/token-manager";
 
@@ -111,6 +112,30 @@ describe("fetchAvailableCodexModels", () => {
     expect(prefersResponsesEndpoint("gpt-5.5")).toBe(true);
     expect(prefersResponsesEndpoint("gemini-4-hydrogen")).toBe(false);
     expect(prefersResponsesEndpoint("mai-code-2")).toBe(false);
+  });
+
+  it("caches supported reasoning efforts and resolves closest effort", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createFetchResponse({
+        data: [
+          {
+            id: "gemini-4-hydrogen",
+            name: "Gemini 4 Hydrogen",
+            version: "gemini-4-hydrogen",
+            supported_endpoints: ["/chat/completions"],
+            capabilities: {
+              type: "chat",
+              supports: { reasoning_effort: ["low", "medium", "high"] },
+            },
+          },
+        ],
+      }),
+    );
+
+    await fetchAvailableCodexModels(tokenManager);
+    expect(resolveCodexReasoningEffort("gemini-4-hydrogen", "high")).toBe("high");
+    expect(resolveCodexReasoningEffort("gemini-4-hydrogen", "xhigh")).toBe("high");
+    expect(resolveCodexReasoningEffort("unknown-model", "high")).toBeUndefined();
   });
 });
 

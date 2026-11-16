@@ -9,10 +9,13 @@ import { convertResponsesToOpenAI } from "../converter/responses-to-openai";
 import { convertOpenAIToResponses } from "../converter/openai-to-responses";
 import { createResponsesStreamTransformer } from "../converter/stream-transformer";
 import {
+  getSupportedReasoningEfforts,
   markModelRequiresChatCompletions,
   prefersResponsesEndpoint,
+  resolveCodexReasoningEffort,
 } from "../models";
 import type { ResponsesRequest } from "../converter/types";
+import type { CopilotCompletionRequest } from "../../../copilot/types";
 
 export interface CodexResponsesServices {
   responses: Pick<CopilotResponsesClient, "createResponse" | "createResponseStream">;
@@ -61,6 +64,52 @@ function summarizeRequestShape(body: ResponsesRequest): string {
       )
     : [];
   return `keys=[${keys.join(",")}] inputTypes=[${inputTypes.join(",")}] toolTypes=[${toolTypes.join(",")}]`;
+}
+
+function isReasoningEffortRejectedError(error: unknown): boolean {
+  if (!(error instanceof CopilotUpstreamError) || error.status !== 400) {
+    return false;
+  }
+  const text = `${error.message}\n${error.body}`.toLowerCase();
+  return text.includes("reasoning_effort");
+}
+
+function buildChatFallbackAttempts(
+  baseRequest: CopilotCompletionRequest,
+  modelId: string,
+): CopilotCompletionRequest[] {
+  const attempts: CopilotCompletionRequest[] = [baseRequest];
+  const supportedEfforts = getSupportedReasoningEfforts(modelId);
+  const canUseLowEffort = Boolean(supportedEfforts?.includes("low"));
+
+  if (
+    canUseLowEffort &&
+    baseRequest.reasoning_effort !== "low"
+  ) {
+    attempts.push({ ...baseRequest, reasoning_effort: "low" });
+  }
+
+  if (
+    Array.isArray(baseRequest.tools) &&
+    baseRequest.tools.length > 0 &&
+    (baseRequest.tool_choice === undefined || baseRequest.tool_choice === "auto")
+  ) {
+    attempts.push({
+      ...baseRequest,
+      ...(canUseLowEffort ? { reasoning_effort: "low" } : {}),
+      tool_choice: "required",
+    });
+  }
+
+  return attempts;
+}
+
+function isSubstantiveTransformedChunk(chunk: string): boolean {
+  return (
+    chunk.includes('"type":"response.output_text.delta"') ||
+    chunk.includes('"type":"function_call"') ||
+    chunk.includes('"type":"response.completed"')
+  );
 }
 
 /**
@@ -166,11 +215,48 @@ export function registerResponsesRoute(
       if (!services.chat) {
         throw new Error("ChatCompletions fallback client is not configured");
       }
-      const openaiRequest = convertResponsesToOpenAI(requestBody);
+      const chatClient = services.chat;
+      const reasoningEffort = resolveCodexReasoningEffort(
+        originalModel,
+        requestBody.reasoning?.effort,
+      );
+      const baseRequest = convertResponsesToOpenAI(requestBody, { reasoningEffort });
+      const attempts = buildChatFallbackAttempts(baseRequest, originalModel);
+
+      const openStreamWithReasoningFallback = async (
+        req: CopilotCompletionRequest,
+      ): Promise<Response> => {
+        try {
+          return await chatClient.chatCompletionStream(req);
+        } catch (error) {
+          if (req.reasoning_effort && isReasoningEffortRejectedError(error)) {
+            const { reasoning_effort: _, ...withoutEffort } = req;
+            return await chatClient.chatCompletionStream(withoutEffort);
+          }
+          throw error;
+        }
+      };
+
+      const completeWithReasoningFallback = async (
+        req: CopilotCompletionRequest,
+      ) => {
+        try {
+          return await chatClient.chatCompletion(req);
+        } catch (error) {
+          if (req.reasoning_effort && isReasoningEffortRejectedError(error)) {
+            const { reasoning_effort: _, ...withoutEffort } = req;
+            return await chatClient.chatCompletion(withoutEffort);
+          }
+          throw error;
+        }
+      };
 
       if (isStream) {
-        const upstream = await services.chat.chatCompletionStream(openaiRequest);
-        if (!upstream.body) {
+        const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
+        c.set("loggedInputTokens", inputEstimate);
+
+        const firstUpstream = await openStreamWithReasoningFallback(attempts[0]);
+        if (!firstUpstream.body) {
           return c.json(
             {
               error: {
@@ -183,39 +269,111 @@ export function registerResponsesRoute(
           );
         }
 
-        const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
-        c.set("loggedInputTokens", inputEstimate);
-
-        const reader = upstream.body
-          .pipeThrough(createResponsesStreamTransformer(originalModel))
-          .getReader();
-
         return stream(c, async (s) => {
           c.header("Content-Type", "text/event-stream");
           c.header("Cache-Control", "no-cache");
           c.header("Connection", "keep-alive");
 
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              await s.write(value);
+          let lastFailureChunks: string[] = [];
+
+          for (let attemptIdx = 0; attemptIdx < attempts.length; attemptIdx++) {
+            let upstream: Response;
+            try {
+              upstream =
+                attemptIdx === 0
+                  ? firstUpstream
+                  : await openStreamWithReasoningFallback(attempts[attemptIdx]);
+            } catch (error) {
+              console.warn(
+                `[Codex Responses Route] ChatCompletions recovery attempt ${attemptIdx + 1} failed to connect:`,
+                error instanceof Error ? error.message : String(error),
+              );
+              continue;
             }
-          } catch (error) {
-            console.error("[Codex Responses Route] ChatCompletions stream error:", error);
-          } finally {
-            reader.releaseLock();
+
+            if (!upstream.body) continue;
+
+            const reader = upstream.body
+              .pipeThrough(createResponsesStreamTransformer(originalModel))
+              .getReader();
+
+            const preOutputBuffer: string[] = [];
+            let flushed = false;
+            let sawFailure = false;
+
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (flushed) {
+                  await s.write(value);
+                  continue;
+                }
+
+                preOutputBuffer.push(value);
+                if (value.includes('"type":"response.failed"')) {
+                  sawFailure = true;
+                  continue;
+                }
+                if (isSubstantiveTransformedChunk(value)) {
+                  flushed = true;
+                  for (const buffered of preOutputBuffer) {
+                    await s.write(buffered);
+                  }
+                  preOutputBuffer.length = 0;
+                }
+              }
+            } catch (error) {
+              console.error("[Codex Responses Route] ChatCompletions stream error:", error);
+              if (flushed) return;
+              sawFailure = true;
+            } finally {
+              reader.releaseLock();
+            }
+
+            if (flushed) {
+              return;
+            }
+
+            lastFailureChunks = preOutputBuffer;
+            if (!sawFailure) {
+              for (const buffered of preOutputBuffer) {
+                await s.write(buffered);
+              }
+              return;
+            }
+
+            if (attemptIdx + 1 < attempts.length) {
+              console.warn(
+                `[Codex Responses Route] Empty ChatCompletions stream for model=${originalModel} (attempt ${attemptIdx + 1}/${attempts.length}); retrying with fallback parameters`,
+              );
+            }
+          }
+
+          for (const chunk of lastFailureChunks) {
+            await s.write(chunk);
           }
         });
       }
 
-      const completion = await services.chat.chatCompletion(openaiRequest);
-      const responsesPayload = convertOpenAIToResponses(completion, originalModel);
-      if (responsesPayload.usage) {
-        c.set("loggedInputTokens", responsesPayload.usage.input_tokens);
-        c.set("loggedOutputTokens", responsesPayload.usage.output_tokens);
+      let lastResponsesPayload = convertOpenAIToResponses(
+        await completeWithReasoningFallback(attempts[0]),
+        originalModel,
+      );
+      for (let attemptIdx = 1; attemptIdx < attempts.length; attemptIdx++) {
+        if (lastResponsesPayload.output.length > 0) break;
+        console.warn(
+          `[Codex Responses Route] Empty ChatCompletions response for model=${originalModel} (attempt ${attemptIdx}/${attempts.length}); retrying with fallback parameters`,
+        );
+        const retryCompletion = await completeWithReasoningFallback(attempts[attemptIdx]);
+        lastResponsesPayload = convertOpenAIToResponses(retryCompletion, originalModel);
       }
-      return c.json(responsesPayload);
+
+      if (lastResponsesPayload.usage) {
+        c.set("loggedInputTokens", lastResponsesPayload.usage.input_tokens);
+        c.set("loggedOutputTokens", lastResponsesPayload.usage.output_tokens);
+      }
+      return c.json(lastResponsesPayload);
     };
 
     const handleViaNativeResponses = async () => {

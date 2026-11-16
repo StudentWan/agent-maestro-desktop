@@ -529,4 +529,129 @@ describe("codex responses route", () => {
     expect(res.status).toBe(502);
     expect(chatCompletion).not.toHaveBeenCalled();
   });
+
+  it("retries streaming ChatCompletions with tool_choice=required when first attempt emits an empty completion", async () => {
+    const emptyStream = new Response(
+      new TextEncoder().encode(
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n' +
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":800,"total_tokens":900}}\n\n' +
+          "data: [DONE]\n\n",
+      ),
+    );
+    const workingStream = new Response(
+      new TextEncoder().encode(
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{\\"cmd\\":\\"ls\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n' +
+          "data: [DONE]\n\n",
+      ),
+    );
+
+    const chatCompletionStream = vi
+      .fn()
+      .mockResolvedValueOnce(emptyStream)
+      .mockResolvedValueOnce(workingStream);
+
+    const app = new Hono();
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({}),
+      chat: { chatCompletion: vi.fn(), chatCompletionStream },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-4-hydrogen",
+        input: "check permissions",
+        stream: true,
+        tools: [{ type: "function", name: "exec_command" }],
+      }),
+    });
+
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(chatCompletionStream).toHaveBeenCalledTimes(2);
+    expect(chatCompletionStream.mock.calls[1][0].tool_choice).toBe("required");
+    expect(text).toContain("event: response.completed");
+    expect(text).toContain("exec_command");
+    expect(text).not.toContain("event: response.failed");
+  });
+
+  it("strips reasoning_effort and retries when ChatCompletions rejects reasoning_effort with HTTP 400", async () => {
+    const { fetchAvailableCodexModels, resetCodexModelRoutingCache } = await import("../models");
+    resetCodexModelRoutingCache();
+    const fetchSpy = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            data: [
+              {
+                id: "gemini-4-hydrogen",
+                name: "Gemini 4 Hydrogen",
+                supported_endpoints: ["/chat/completions"],
+                capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
+              },
+            ],
+          }),
+        ),
+    });
+    const origFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", fetchSpy);
+    await fetchAvailableCodexModels({
+      getTokenBundle: vi.fn().mockResolvedValue({
+        token: "jwt",
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+        baseUrl: "https://api.individual.githubcopilot.com",
+      }),
+    } as never);
+    vi.stubGlobal("fetch", origFetch);
+
+    const chatCompletion = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new CopilotUpstreamError(
+          "Copilot API error (400)",
+          400,
+          '{"error":{"message":"Unsupported parameter: reasoning_effort"}}',
+        ),
+      )
+      .mockResolvedValueOnce({
+        id: "chatcmpl-no-effort",
+        object: "chat.completion",
+        created: 1700000000,
+        model: "gemini-4-hydrogen",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "Recovered without reasoning_effort" },
+            finish_reason: "stop",
+          },
+        ],
+      });
+
+    const app = new Hono();
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({}),
+      chat: { chatCompletion, chatCompletionStream: vi.fn() },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-4-hydrogen",
+        input: "hi",
+        reasoning: { effort: "high" },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(chatCompletion).toHaveBeenCalledTimes(2);
+    expect(chatCompletion.mock.calls[0][0].reasoning_effort).toBe("high");
+    expect(chatCompletion.mock.calls[1][0]).not.toHaveProperty("reasoning_effort");
+    const body = await res.json();
+    expect(body.output[0].content[0].text).toBe("Recovered without reasoning_effort");
+    resetCodexModelRoutingCache();
+  });
 });
