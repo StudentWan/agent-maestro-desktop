@@ -8,6 +8,29 @@ import { __testing, syncCodexModelCatalog } from "../local-config";
 const { parseExisting, mergeProvider, stripProvider, PROVIDER_NAME } =
   __testing;
 
+// Required ModelInfo fields in Codex 0.124.0. JSON.parse alone does not
+// validate the catalog contract enforced by Codex's Rust deserializer.
+function expectValidCatalogEntry(entry: Record<string, unknown>): void {
+  expect(entry).toMatchObject({
+    slug: expect.any(String),
+    display_name: expect.any(String),
+    supported_reasoning_levels: expect.any(Array),
+    shell_type: expect.any(String),
+    visibility: "list",
+    supported_in_api: true,
+    priority: expect.any(Number),
+    base_instructions: expect.stringMatching(/\S/),
+    supports_reasoning_summaries: expect.any(Boolean),
+    support_verbosity: expect.any(Boolean),
+    truncation_policy: {
+      mode: expect.stringMatching(/^(bytes|tokens)$/),
+      limit: expect.any(Number),
+    },
+    supports_parallel_tool_calls: expect.any(Boolean),
+    experimental_supported_tools: expect.any(Array),
+  });
+}
+
 describe("Codex local-config (parse → merge → stringify)", () => {
   it("merges our provider into a fresh config", () => {
     const merged = mergeProvider({}, 23337, "gpt-5");
@@ -205,6 +228,63 @@ model_provider = "aoai-1"
     ).toBeUndefined();
   });
 
+  it("writes complete model metadata when no catalog exists", async () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "codex-catalog-test-"));
+    try {
+      const catalogPath = path.join(tmpDir, "agent-maestro-models.json");
+      const configPath = path.join(tmpDir, "config.toml");
+      await syncCodexModelCatalog(
+        [
+          { id: "gpt-5.3-codex", name: "GPT-5.3-Codex", contextWindow: 272000 },
+          { id: "gemini-4-argon", name: "Gemini 4 Argon" },
+        ],
+        { configPath, catalogPath },
+      );
+
+      const catalog = JSON.parse(readFileSync(catalogPath, "utf-8"));
+      expect(catalog.models).toHaveLength(2);
+      for (const entry of catalog.models) {
+        expectValidCatalogEntry(entry);
+        expect(entry.truncation_policy).toEqual({ mode: "tokens", limit: 10000 });
+        expect(entry.experimental_supported_tools).toEqual([]);
+      }
+      expect(parse(readFileSync(configPath, "utf-8")).model_catalog_json).toBe(catalogPath);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["managed", "custom"])("repairs incomplete %s catalog seeds on every sync", async (source) => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "codex-catalog-test-"));
+    try {
+      const catalogPath = path.join(tmpDir, "agent-maestro-models.json");
+      const configPath = path.join(tmpDir, "config.toml");
+      const seedPath = source === "managed" ? catalogPath : path.join(tmpDir, "custom-models.json");
+      writeFileSync(seedPath, JSON.stringify({
+        models: [{ slug: "gpt-5.3-codex", visibility: "list", seed_metadata: "KEEP_ME" }],
+      }));
+      writeFileSync(configPath, __testing.stringifyCodexConfig({ model_catalog_json: seedPath }));
+      const models = [
+        { id: "gpt-5.3-codex", name: "GPT-5.3-Codex" },
+        { id: "grok-4.7", name: "Grok 4.7" },
+      ];
+
+      await syncCodexModelCatalog(models, { configPath, catalogPath });
+      const catalog = JSON.parse(readFileSync(catalogPath, "utf-8"));
+      expect(catalog.models).toHaveLength(2);
+      // Check both the matching seed and the fallback used for a new model.
+      for (const entry of catalog.models) {
+        expectValidCatalogEntry(entry);
+        expect(entry.seed_metadata).toBe("KEEP_ME");
+      }
+
+      await syncCodexModelCatalog(models, { configPath, catalogPath });
+      expect(JSON.parse(readFileSync(catalogPath, "utf-8"))).toEqual(catalog);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("syncs discovered models into model_catalog_json while preserving seed metadata", async () => {
     const tmpDir = mkdtempSync(path.join(os.tmpdir(), "codex-catalog-test-"));
     try {
@@ -221,6 +301,12 @@ model_provider = "aoai-1"
               display_name: "Gemini 4 Argon",
               visibility: "list",
               base_instructions: "KEEP_ME",
+              truncation_policy: { mode: "bytes", limit: 24576 },
+              experimental_supported_tools: ["custom_tool"],
+              supports_reasoning_summaries: false,
+              support_verbosity: false,
+              supports_parallel_tool_calls: false,
+              shell_type: "default",
             },
           ],
         }),
@@ -251,6 +337,18 @@ model_provider = "aoai-1"
         "grok-4.7",
       ]);
       expect(writtenCatalog.models[0].base_instructions).toBe("KEEP_ME");
+      for (const entry of writtenCatalog.models) {
+        expectValidCatalogEntry(entry);
+        expect(entry).toMatchObject({
+          base_instructions: "KEEP_ME",
+          truncation_policy: { mode: "bytes", limit: 24576 },
+          experimental_supported_tools: ["custom_tool"],
+          supports_reasoning_summaries: false,
+          support_verbosity: false,
+          supports_parallel_tool_calls: false,
+          shell_type: "default",
+        });
+      }
       expect(writtenCatalog.models[1].context_window).toBe(128000);
       expect(writtenCatalog.models[1].supported_reasoning_levels?.map((r) => r.effort)).toEqual([
         "low",
