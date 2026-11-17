@@ -196,4 +196,83 @@ describe("createResponsesStreamTransformer", () => {
       total_tokens: 13,
     });
   });
+
+  it("streams reasoning_text as a Responses reasoning item before assistant text", async () => {
+    const sse = buildCopilotSSE([
+      { choices: [{ index: 0, delta: { reasoning_text: "thinking " }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { reasoning_text: "hard" }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { content: "answer" }, finish_reason: null }] },
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+          completion_tokens_details: { reasoning_tokens: 4 },
+        },
+      },
+    ]);
+
+    const events = await runTransformer(sse);
+    expect(events.map((e) => e.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.reasoning_summary_part.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.reasoning_summary_part.done",
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed",
+    ]);
+
+    const completed = events.find(
+      (e): e is Extract<ResponsesStreamEvent, { type: "response.completed" }> =>
+        e.type === "response.completed",
+    );
+    expect(completed?.response.output).toHaveLength(2);
+    expect(completed?.response.output[0]).toMatchObject({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "thinking hard" }],
+    });
+    expect(completed?.response.output[1]).toMatchObject({
+      type: "message",
+      content: [{ type: "output_text", text: "answer" }],
+    });
+    expect(completed?.response.usage?.output_tokens_details?.reasoning_tokens).toBe(4);
+  });
+
+  it("emits response.failed when upstream emits only reasoning without any message or tool call", async () => {
+    const sse = buildCopilotSSE([
+      { choices: [{ index: 0, delta: { reasoning_text: "only thinking" }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+    ]);
+
+    const events = await runTransformer(sse);
+    const types = events.map((e) => e.type);
+    expect(types).toContain("response.reasoning_summary_text.delta");
+    expect(types).toContain("response.failed");
+    expect(types).not.toContain("response.completed");
+  });
+
+  it("emits response.failed when upstream returns empty stop with hidden output tokens (e.g. Gemini thinking-only)", async () => {
+    const sse = buildCopilotSSE([
+      { choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] },
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 72632, completion_tokens: 894, total_tokens: 73526 },
+      },
+    ]);
+
+    const events = await runTransformer(sse);
+    const types = events.map((e) => e.type);
+    expect(types).toContain("response.failed");
+    expect(types).not.toContain("response.completed");
+  });
 });

@@ -61,7 +61,7 @@ export function createResponsesStreamTransformer(
   };
 
   // Buffer for the current open block. We can have at most one open block
-  // at a time across both kinds.
+  // at a time across text, reasoning, and tool calls.
   type OpenBlock =
     | {
         kind: "text";
@@ -71,8 +71,16 @@ export function createResponsesStreamTransformer(
         accumulated: string;
       }
     | {
+        kind: "reasoning";
+        outputIndex: number;
+        itemId: string;
+        summaryIndex: number;
+        accumulated: string;
+      }
+    | {
         kind: "tool";
         outputIndex: number;
+        toolIndex: number;
         itemId: string;
         callId: string;
         name: string;
@@ -86,6 +94,9 @@ export function createResponsesStreamTransformer(
   const toolBlocksByIndex = new Map<number, Extract<OpenBlock, { kind: "tool" }>>();
 
   let messageStarted = false;
+  let reasoningStarted = false;
+  let sawAnyChoice = false;
+  const observedDeltaKeys = new Set<string>();
   let finishReason: string | null = null;
   let usage: ResponsesResponse["usage"];
   let completed = false;
@@ -163,6 +174,46 @@ export function createResponsesStreamTransformer(
     return { intro, block };
   }
 
+  function openReasoningBlock(): {
+    intro: string;
+    block: Extract<OpenBlock, { kind: "reasoning" }>;
+  } {
+    outputIndex++;
+    const itemId = `rs_${responseId}_${outputIndex}`;
+    const block: Extract<OpenBlock, { kind: "reasoning" }> = {
+      kind: "reasoning",
+      outputIndex,
+      itemId,
+      summaryIndex: 0,
+      accumulated: "",
+    };
+
+    const item: ResponsesOutputItem = {
+      id: itemId,
+      type: "reasoning",
+      status: "in_progress",
+      summary: [],
+    };
+    responseSnapshot.output.push(item);
+
+    let intro = "";
+    intro += formatSSE({
+      type: "response.output_item.added",
+      sequence_number: nextSeq(),
+      output_index: outputIndex,
+      item,
+    });
+    intro += formatSSE({
+      type: "response.reasoning_summary_part.added",
+      sequence_number: nextSeq(),
+      item_id: itemId,
+      output_index: outputIndex,
+      summary_index: 0,
+      part: { type: "summary_text", text: "" },
+    });
+    return { intro, block };
+  }
+
   function closeBlock(): string {
     if (!open) return "";
     let out = "";
@@ -181,6 +232,37 @@ export function createResponsesStreamTransformer(
         role: "assistant",
         status: "completed",
         content: [{ type: "output_text", text: open.accumulated }],
+      };
+      responseSnapshot.output[idx] = finalItem;
+      out += formatSSE({
+        type: "response.output_item.done",
+        sequence_number: nextSeq(),
+        output_index: idx,
+        item: finalItem,
+      });
+    } else if (open.kind === "reasoning") {
+      out += formatSSE({
+        type: "response.reasoning_summary_text.done",
+        sequence_number: nextSeq(),
+        item_id: open.itemId,
+        output_index: open.outputIndex,
+        summary_index: open.summaryIndex,
+        text: open.accumulated,
+      });
+      out += formatSSE({
+        type: "response.reasoning_summary_part.done",
+        sequence_number: nextSeq(),
+        item_id: open.itemId,
+        output_index: open.outputIndex,
+        summary_index: open.summaryIndex,
+        part: { type: "summary_text", text: open.accumulated },
+      });
+      const idx = open.outputIndex;
+      const finalItem: ResponsesOutputItem = {
+        id: open.itemId,
+        type: "reasoning",
+        status: "completed",
+        summary: [{ type: "summary_text", text: open.accumulated }],
       };
       responseSnapshot.output[idx] = finalItem;
       out += formatSSE({
@@ -212,7 +294,7 @@ export function createResponsesStreamTransformer(
         output_index: idx,
         item: finalItem,
       });
-      toolBlocksByIndex.delete(open.outputIndex);
+      toolBlocksByIndex.delete(open.toolIndex);
     }
     open = null;
     return out;
@@ -237,6 +319,9 @@ export function createResponsesStreamTransformer(
   function emitFailure(message: string): string {
     let out = closeBlock();
     responseSnapshot.status = "failed";
+    if (usage) {
+      responseSnapshot.usage = usage;
+    }
     responseSnapshot.error = { code: "server_error", message };
     out += formatSSE({
       type: "response.failed",
@@ -244,6 +329,27 @@ export function createResponsesStreamTransformer(
       response: cloneSnapshot(),
     });
     completed = true;
+    return out;
+  }
+
+  function handleReasoningDelta(text: string): string {
+    if (!text) return "";
+    let out = "";
+    if (open?.kind !== "reasoning") {
+      if (open) out += closeBlock();
+      const { intro, block } = openReasoningBlock();
+      out += intro;
+      open = block;
+    }
+    open.accumulated += text;
+    out += formatSSE({
+      type: "response.reasoning_summary_text.delta",
+      sequence_number: nextSeq(),
+      item_id: open.itemId,
+      output_index: open.outputIndex,
+      summary_index: open.summaryIndex,
+      delta: text,
+    });
     return out;
   }
 
@@ -294,6 +400,7 @@ export function createResponsesStreamTransformer(
       block = {
         kind: "tool",
         outputIndex,
+        toolIndex: index,
         itemId,
         callId,
         name,
@@ -349,9 +456,45 @@ export function createResponsesStreamTransformer(
   }
 
   // Buffer to collect raw SSE text, then parse synchronously per transform call
+  const decoder = new TextDecoder();
   let sseBuffer = "";
 
+  function finalizeStream(): string {
+    let out = "";
+    if (!sentInitial) out += emitInitial();
+    if (!messageStarted) {
+      const abnormalFinish =
+        finishReason !== null &&
+        finishReason !== "stop" &&
+        finishReason !== "tool_calls";
+      const hasOutputTokens = (usage?.output_tokens ?? 0) > 0;
+      if (sawAnyChoice || reasoningStarted || abnormalFinish || hasOutputTokens) {
+        // Model returned chunks/tokens (e.g. only reasoning or empty stop)
+        // without producing assistant text or tool calls. Fail the response
+        // so Codex retries automatically instead of silently ending the turn.
+        const deltaKeys = Array.from(observedDeltaKeys).join(",") || "none";
+        console.warn(
+          `[Codex StreamTransformer] Empty completion (model=${originalModel}, finish_reason=${finishReason ?? "null"}, output_tokens=${usage?.output_tokens ?? 0}, delta_keys=[${deltaKeys}])`,
+        );
+        const reasonHint = finishReason ? ` (finish_reason=${finishReason})` : "";
+        out += emitFailure(
+          `Model finished without producing assistant output or tool calls${reasonHint}.`,
+        );
+        return out;
+      }
+      // Completely empty synthetic stream (e.g. only [DONE]): emit an empty
+      // placeholder text block so clients expecting at least one item don't choke.
+      const { intro, block } = openTextBlock();
+      out += intro;
+      open = block;
+      messageStarted = true;
+    }
+    out += emitCompletion();
+    return out;
+  }
+
   function processSSEBuffer(controller: TransformStreamDefaultController<string>): void {
+    sseBuffer = sseBuffer.replace(/\r\n/g, "\n");
     while (true) {
       const frameEnd = sseBuffer.indexOf("\n\n");
       if (frameEnd === -1) break;
@@ -372,23 +515,7 @@ export function createResponsesStreamTransformer(
 
       if (data === "[DONE]") {
         if (!completed) {
-          let out = "";
-          if (!sentInitial) out += emitInitial();
-          if (!messageStarted) {
-            // No deltas at all — emit an empty text block so Codex doesn't
-            // see a completely-empty response (some clients tolerate it,
-            // some don't; the empty placeholder matches what the
-            // non-streaming converter would emit).
-            const { intro, block } = openTextBlock();
-            out += intro;
-            open = block;
-            messageStarted = true;
-          }
-          // Surface the model's stop reason in the snapshot for callers
-          // that inspect it; Responses doesn't carry a top-level finish
-          // reason, but we keep the local for parity.
-          void finishReason;
-          out += emitCompletion();
+          const out = finalizeStream();
           if (out) controller.enqueue(out);
         }
         return;
@@ -401,6 +528,9 @@ export function createResponsesStreamTransformer(
             prompt_tokens?: number;
             completion_tokens?: number;
             total_tokens?: number;
+            completion_tokens_details?: {
+              reasoning_tokens?: number;
+            };
           };
         };
 
@@ -408,20 +538,43 @@ export function createResponsesStreamTransformer(
         if (!sentInitial) out += emitInitial();
 
         if (chunk.usage) {
+          const reasoningTokens =
+            chunk.usage.completion_tokens_details?.reasoning_tokens;
           usage = {
             input_tokens: chunk.usage.prompt_tokens ?? 0,
             output_tokens: chunk.usage.completion_tokens ?? 0,
             total_tokens: chunk.usage.total_tokens,
+            ...(typeof reasoningTokens === "number"
+              ? { output_tokens_details: { reasoning_tokens: reasoningTokens } }
+              : {}),
           };
         }
 
         const choice = chunk.choices?.[0];
         if (choice) {
-          if (choice.delta.content != null && choice.delta.content !== "") {
-            messageStarted = true;
-            out += handleTextDelta(choice.delta.content);
+          sawAnyChoice = true;
+          const delta = choice.delta as Record<string, unknown> | undefined;
+          if (delta && typeof delta === "object") {
+            for (const key of Object.keys(delta)) {
+              observedDeltaKeys.add(key);
+            }
           }
-          if (choice.delta.tool_calls) {
+          const reasoningDelta =
+            choice.delta?.reasoning_text ??
+            choice.delta?.reasoning_content ??
+            choice.delta?.reasoning;
+          if (typeof reasoningDelta === "string" && reasoningDelta !== "") {
+            reasoningStarted = true;
+            out += handleReasoningDelta(reasoningDelta);
+          }
+
+          const textDelta = choice.delta?.content ?? choice.delta?.refusal;
+          if (typeof textDelta === "string" && textDelta !== "") {
+            messageStarted = true;
+            out += handleTextDelta(textDelta);
+          }
+
+          if (choice.delta?.tool_calls) {
             for (const tc of choice.delta.tool_calls) {
               messageStarted = true;
               out += handleToolCallDelta(tc.index, {
@@ -445,25 +598,19 @@ export function createResponsesStreamTransformer(
   return new TransformStream<Uint8Array, string>({
     transform(chunk, controller) {
       if (completed) return;
-      sseBuffer += new TextDecoder().decode(chunk);
+      sseBuffer += decoder.decode(chunk, { stream: true });
       processSSEBuffer(controller);
     },
     flush(controller) {
       if (completed) return;
+      sseBuffer += decoder.decode();
       // Drain any straggler frame missing its trailing blank line.
       if (sseBuffer.trim()) {
         sseBuffer += "\n\n";
         processSSEBuffer(controller);
       }
       if (!completed) {
-        let out = "";
-        if (!sentInitial) out += emitInitial();
-        if (!messageStarted) {
-          const { intro, block } = openTextBlock();
-          out += intro;
-          open = block;
-        }
-        out += emitCompletion();
+        const out = finalizeStream();
         if (out) controller.enqueue(out);
       }
     },

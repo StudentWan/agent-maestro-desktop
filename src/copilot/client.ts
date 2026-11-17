@@ -3,9 +3,29 @@ import {
   buildCopilotHeaders,
   buildCopilotStreamHeaders,
 } from "./headers";
-import type { CopilotCompletionRequest, CopilotCompletionResponse } from "./types";
+import type { CopilotCompletionRequest, CopilotCompletionResponse, CopilotToken } from "./types";
 import { TokenManager } from "./token-manager";
 import { CopilotUpstreamError, truncateUpstreamBody } from "./upstream-error";
+
+async function resolveChatTarget(
+  tokenManager: TokenManager,
+): Promise<{ token: string; url: string }> {
+  const provider = tokenManager as TokenManager & {
+    getTokenBundle?: () => Promise<CopilotToken>;
+  };
+  if (typeof provider.getTokenBundle === "function") {
+    const bundle = await provider.getTokenBundle();
+    const base = bundle.baseUrl.trim().replace(/\/+$/, "");
+    return {
+      token: bundle.token,
+      url: base ? `${base}/chat/completions` : COPILOT_CHAT_URL,
+    };
+  }
+  return {
+    token: await tokenManager.getToken(),
+    url: COPILOT_CHAT_URL,
+  };
+}
 
 /**
  * HTTP client for the Copilot Chat (`/chat/completions`) API.
@@ -32,10 +52,10 @@ export class CopilotClient {
    * Send a non-streaming chat completion request
    */
   async chatCompletion(request: CopilotCompletionRequest): Promise<CopilotCompletionResponse> {
-    const token = await this.tokenManager.getToken();
+    const { token, url } = await resolveChatTarget(this.tokenManager);
     const headers = buildCopilotHeaders(token);
 
-    const response = await fetch(COPILOT_CHAT_URL, {
+    const response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify({ ...request, stream: false }),
@@ -57,10 +77,10 @@ export class CopilotClient {
    * Send a streaming chat completion request, returns a ReadableStream
    */
   async chatCompletionStream(request: CopilotCompletionRequest): Promise<Response> {
-    const token = await this.tokenManager.getToken();
+    const { token, url } = await resolveChatTarget(this.tokenManager);
     const headers = buildCopilotStreamHeaders(token);
 
-    const response = await fetch(COPILOT_CHAT_URL, {
+    const response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify({ ...request, stream: true }),

@@ -21,6 +21,7 @@ export interface CopilotCompletionRequest {
   max_tokens?: number;
   n?: number;
   stop?: string | string[];
+  reasoning_effort?: string;
   tools?: CopilotTool[];
   tool_choice?: string | { type: string; function?: { name: string } };
 }
@@ -84,6 +85,10 @@ export interface CopilotStreamChoice {
   delta: {
     role?: string;
     content?: string | null;
+    refusal?: string | null;
+    reasoning_text?: string | null;
+    reasoning_content?: string | null;
+    reasoning?: string | null;
     tool_calls?: Array<{
       index: number;
       id?: string;

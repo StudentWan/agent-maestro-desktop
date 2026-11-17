@@ -68,7 +68,54 @@ const STRIPPED_BODY_FIELDS = [
   "user",
   "safety_identifier",
   "metadata",
+  "client_metadata",
 ] as const;
+
+function isOpenAINativeResponsesModel(model: unknown): boolean {
+  if (typeof model !== "string") return true;
+  const id = model.toLowerCase();
+  return (
+    id.startsWith("gpt-") ||
+    id.startsWith("openai/") ||
+    id.startsWith("o1") ||
+    id.startsWith("o3") ||
+    id.startsWith("o4") ||
+    id.startsWith("o5") ||
+    id.includes("codex")
+  );
+}
+
+function sanitizeToolsForModel(
+  tools: unknown,
+  model: unknown,
+): { tools: unknown; changed: boolean } {
+  if (!Array.isArray(tools) || isOpenAINativeResponsesModel(model)) {
+    return { tools, changed: false };
+  }
+
+  let changed = false;
+  const out: unknown[] = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") {
+      out.push(tool);
+      continue;
+    }
+    const typed = tool as { type?: unknown; tools?: unknown };
+    if (typed.type === "tool_search") {
+      changed = true;
+      continue;
+    }
+    if (typed.type === "namespace") {
+      changed = true;
+      if (Array.isArray(typed.tools)) {
+        out.push(...typed.tools);
+      }
+      continue;
+    }
+    out.push(tool);
+  }
+  return { tools: out, changed };
+}
 
 function sanitizeBody(body: unknown): unknown {
   if (!body || typeof body !== "object") return body;
@@ -78,6 +125,14 @@ function sanitizeBody(body: unknown): unknown {
   for (const [key, value] of Object.entries(obj)) {
     if ((STRIPPED_BODY_FIELDS as readonly string[]).includes(key)) {
       changed = true;
+      continue;
+    }
+    if (key === "tools") {
+      const sanitized = sanitizeToolsForModel(value, obj.model);
+      if (sanitized.changed) {
+        changed = true;
+      }
+      out[key] = sanitized.tools;
       continue;
     }
     out[key] = value;

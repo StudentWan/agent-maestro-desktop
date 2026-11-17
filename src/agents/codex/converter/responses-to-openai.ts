@@ -52,6 +52,7 @@ export class ResponsesRequestError extends Error {
  */
 export function convertResponsesToOpenAI(
   request: ResponsesRequest,
+  options?: { reasoningEffort?: string },
 ): CopilotCompletionRequest {
   if (request.previous_response_id) {
     throw new ResponsesRequestError(
@@ -98,6 +99,9 @@ export function convertResponsesToOpenAI(
   }
   if (request.top_p !== undefined) {
     result.top_p = request.top_p;
+  }
+  if (options?.reasoningEffort) {
+    result.reasoning_effort = options.reasoningEffort;
   }
 
   const tools = convertResponsesToolsToOpenAI(request.tools);
@@ -150,22 +154,26 @@ function appendItem(
           arguments: item.arguments ?? "",
         },
       };
-      // Tool-call items live as their own assistant turn in the Responses
-      // wire format. ChatCompletions requires the calls to be attached to
-      // an assistant message — emit one with empty content per turn so we
-      // don't accidentally merge separate tool-call rounds.
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [call],
-      });
+      // Group consecutive function_call items from the same turn into a
+      // single assistant message with `tool_calls`, matching OpenAI and
+      // Gemini ChatCompletions turn-alternation expectations.
+      const prev = messages[messages.length - 1];
+      if (prev && prev.role === "assistant" && Array.isArray(prev.tool_calls)) {
+        prev.tool_calls.push(call);
+      } else {
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: [call],
+        });
+      }
       return;
     }
 
     case "function_call_output": {
       messages.push({
         role: "tool",
-        content: item.output ?? "",
+        content: stringifyToolOutput(item.output),
         tool_call_id: item.call_id,
       });
       return;
@@ -176,6 +184,11 @@ function appendItem(
       // Plain message: role + content (string or content parts array).
       const role = item.role;
       const text = stringifyMessageContent(item.content);
+      // Skip empty assistant text items left behind by empty/aborted turns;
+      // Gemini ChatCompletions rejects or stalls on empty model turns.
+      if (role === "assistant" && text === "") {
+        return;
+      }
       // System / developer roles in Responses both map to the OpenAI
       // "system" role since Copilot's ChatCompletions doesn't model
       // "developer" separately.
@@ -193,6 +206,21 @@ function appendItem(
   }
 }
 
+function stringifyToolOutput(
+  output: string | ResponsesContentPart[] | Record<string, unknown> | undefined | null,
+): string {
+  if (output === undefined || output === null) return "";
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    const text = stringifyMessageContent(output);
+    return text || JSON.stringify(output);
+  }
+  if (typeof output === "object") {
+    return JSON.stringify(output);
+  }
+  return String(output);
+}
+
 /**
  * Flatten a `content` field (string or content-parts array) into a single
  * string for the ChatCompletions side. Copilot's `chat/completions` accepts
@@ -207,12 +235,19 @@ function stringifyMessageContent(
 
   let out = "";
   for (const part of content) {
+    if (typeof part === "string") {
+      out += part;
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
     switch (part.type) {
       case "input_text":
       case "output_text":
-        out += part.text;
+      case "text":
+        out += part.text ?? "";
         break;
       case "input_image":
+      case "image_url":
         // Copilot's chat completions endpoint doesn't accept inline images
         // for every model — drop with a marker so we don't silently change
         // the prompt's meaning.

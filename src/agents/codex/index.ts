@@ -16,6 +16,7 @@ import {
   applyCodexConfig,
   getCodexConfigSnippet,
   removeCodexConfig,
+  syncCodexModelCatalog,
   writeModelToCodexConfig,
 } from "./local-config";
 import { fetchAvailableCodexModels } from "./models";
@@ -46,7 +47,10 @@ export const codexPlugin: AgentPlugin = {
     registerResponsesRoute(app, () => {
       const client = getClient();
       if (!client) return null;
-      return new CopilotResponsesClient(client.getTokenManager());
+      return {
+        responses: new CopilotResponsesClient(client.getTokenManager()),
+        chat: client,
+      };
     });
     registerCodexModelsRoute(app, () => {
       const client = getClient();
@@ -56,7 +60,16 @@ export const codexPlugin: AgentPlugin = {
   },
 
   async fetchModels(tokenManager: TokenManager): Promise<AgentModelInfo[]> {
-    return fetchAvailableCodexModels(tokenManager);
+    const models = await fetchAvailableCodexModels(tokenManager);
+    try {
+      await syncCodexModelCatalog(models);
+    } catch (error) {
+      console.warn(
+        "[CodexPlugin] Failed to sync Codex model_catalog_json:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return models;
   },
 
   localConfig: {

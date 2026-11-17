@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { parse } from "smol-toml";
-import { __testing } from "../local-config";
+import { __testing, syncCodexModelCatalog } from "../local-config";
 
 const { parseExisting, mergeProvider, stripProvider, PROVIDER_NAME } =
   __testing;
@@ -200,5 +203,61 @@ model_provider = "aoai-1"
     expect(
       mergeProvider({}, 23337, "gpt-5.5", Number.NaN).model_context_window,
     ).toBeUndefined();
+  });
+
+  it("syncs discovered models into model_catalog_json while preserving seed metadata", async () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "codex-catalog-test-"));
+    try {
+      const seedPath = path.join(tmpDir, "custom-models.json");
+      const catalogPath = path.join(tmpDir, "agent-maestro-models.json");
+      const configPath = path.join(tmpDir, "config.toml");
+
+      writeFileSync(
+        seedPath,
+        JSON.stringify({
+          models: [
+            {
+              slug: "gemini-4-argon",
+              display_name: "Gemini 4 Argon",
+              visibility: "list",
+              base_instructions: "KEEP_ME",
+            },
+          ],
+        }),
+      );
+      writeFileSync(
+        configPath,
+        `model_provider = "agent-maestro"\nmodel_catalog_json = "${seedPath.replace(/\\/g, "\\\\")}"\n`,
+      );
+
+      await syncCodexModelCatalog(
+        [
+          { id: "gemini-4-argon", name: "Gemini 4 Argon", contextWindow: 982833 },
+          { id: "grok-4.7", name: "Grok 4.7", contextWindow: 128000, reasoningEfforts: ["low", "high"] },
+        ],
+        { configPath, catalogPath },
+      );
+
+      const updatedToml = parse(readFileSync(configPath, "utf-8")) as {
+        model_catalog_json?: string;
+      };
+      expect(updatedToml.model_catalog_json).toBe(catalogPath);
+
+      const writtenCatalog = JSON.parse(readFileSync(catalogPath, "utf-8")) as {
+        models: Array<{ slug: string; base_instructions?: string; context_window?: number; supported_reasoning_levels?: Array<{ effort: string }> }>;
+      };
+      expect(writtenCatalog.models.map((m) => m.slug)).toEqual([
+        "gemini-4-argon",
+        "grok-4.7",
+      ]);
+      expect(writtenCatalog.models[0].base_instructions).toBe("KEEP_ME");
+      expect(writtenCatalog.models[1].context_window).toBe(128000);
+      expect(writtenCatalog.models[1].supported_reasoning_levels?.map((r) => r.effort)).toEqual([
+        "low",
+        "high",
+      ]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

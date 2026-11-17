@@ -58,15 +58,16 @@ export interface ResponsesFunctionCallInput {
 export interface ResponsesFunctionCallOutputInput {
   type: "function_call_output";
   call_id: string;
-  output: string;
+  output: string | ResponsesContentPart[] | Record<string, unknown>;
 }
 
 export type ResponsesContentPart =
   | { type: "input_text"; text: string }
   | { type: "output_text"; text: string }
+  | { type: "text"; text: string }
   | {
-      type: "input_image";
-      image_url?: string;
+      type: "input_image" | "image_url";
+      image_url?: string | { url?: string };
       detail?: "low" | "high" | "auto";
     };
 
@@ -97,6 +98,9 @@ export interface ResponsesResponse {
     input_tokens: number;
     output_tokens: number;
     total_tokens?: number;
+    output_tokens_details?: {
+      reasoning_tokens?: number;
+    };
   };
   error?: { code: string; message: string } | null;
   /** Default; we don't preserve any internal IDs across requests. */
@@ -118,6 +122,12 @@ export type ResponsesOutputItem =
       name: string;
       arguments: string;
       status: "completed";
+    }
+  | {
+      id: string;
+      type: "reasoning";
+      status?: "in_progress" | "completed";
+      summary: Array<{ type: "summary_text"; text: string }>;
     };
 
 // ---------- Streaming events ----------
@@ -163,6 +173,38 @@ export type ResponsesStreamEvent =
       output_index: number;
       content_index: number;
       part: { type: "output_text"; text: string };
+    }
+  | {
+      type: "response.reasoning_summary_part.added";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      summary_index: number;
+      part: { type: "summary_text"; text: "" };
+    }
+  | {
+      type: "response.reasoning_summary_text.delta";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      summary_index: number;
+      delta: string;
+    }
+  | {
+      type: "response.reasoning_summary_text.done";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      summary_index: number;
+      text: string;
+    }
+  | {
+      type: "response.reasoning_summary_part.done";
+      sequence_number: number;
+      item_id: string;
+      output_index: number;
+      summary_index: number;
+      part: { type: "summary_text"; text: string };
     }
   | {
       type: "response.output_item.done";
