@@ -263,27 +263,39 @@ const DEFAULT_REASONING_DESCRIPTIONS: Record<string, string> = {
 
 interface CodexCatalogModelEntry {
   slug: string;
-  display_name?: string;
+  display_name: string;
   description?: string;
-  visibility?: string;
-  supported_in_api?: boolean;
-  priority?: number;
+  visibility: string;
+  supported_in_api: boolean;
+  priority: number;
+  shell_type: string;
+  base_instructions: string;
+  supports_reasoning_summaries: boolean;
+  support_verbosity: boolean;
+  truncation_policy: { mode: "bytes" | "tokens"; limit: number };
+  supports_parallel_tool_calls: boolean;
+  experimental_supported_tools: string[];
+  supports_search_tool?: boolean;
   context_window?: number;
   max_context_window?: number;
   default_reasoning_level?: string;
-  supported_reasoning_levels?: Array<{ effort: string; description: string }>;
+  supported_reasoning_levels: Array<{ effort: string; description: string }>;
   [key: string]: unknown;
 }
 
-async function readCatalogSeed(filePath: string): Promise<Map<string, CodexCatalogModelEntry>> {
-  const seed = new Map<string, CodexCatalogModelEntry>();
+// Custom catalogs and files written by older Agent Maestro versions may be
+// incomplete. Only the generated output must satisfy the full Codex contract.
+type CodexCatalogSeedEntry = Pick<CodexCatalogModelEntry, "slug"> & Partial<CodexCatalogModelEntry>;
+
+async function readCatalogSeed(filePath: string): Promise<Map<string, CodexCatalogSeedEntry>> {
+  const seed = new Map<string, CodexCatalogSeedEntry>();
   try {
     const raw = await fs.readFile(filePath, "utf-8");
     const parsed = JSON.parse(raw) as { models?: unknown };
     if (Array.isArray(parsed.models)) {
       for (const entry of parsed.models) {
         if (entry && typeof entry === "object" && typeof (entry as { slug?: unknown }).slug === "string") {
-          const typed = entry as CodexCatalogModelEntry;
+          const typed = entry as CodexCatalogSeedEntry;
           seed.set(typed.slug.toLowerCase(), typed);
         }
       }
@@ -297,8 +309,8 @@ async function readCatalogSeed(filePath: string): Promise<Map<string, CodexCatal
 function buildCodexCatalogEntry(
   model: AgentModelInfo,
   priority: number,
-  seed: CodexCatalogModelEntry | undefined,
-  fallbackTemplate: CodexCatalogModelEntry | undefined,
+  seed: CodexCatalogSeedEntry | undefined,
+  fallbackTemplate: CodexCatalogSeedEntry | undefined,
 ): CodexCatalogModelEntry {
   const contextWindow = model.contextWindow ?? seed?.context_window ?? 128000;
   const reasoningEfforts = model.reasoningEfforts?.filter(
@@ -323,20 +335,22 @@ function buildCodexCatalogEntry(
       ? "high"
       : supportedReasoningLevels[0]?.effort ?? "medium");
 
-  const base: CodexCatalogModelEntry = seed
-    ? { ...seed }
-    : fallbackTemplate
-      ? { ...fallbackTemplate }
-      : {
-          slug: model.id,
-          prefer_websockets: false,
-          support_verbosity: true,
-          default_verbosity: "low",
-          input_modalities: ["text", "image"],
-          supports_parallel_tool_calls: true,
-          shell_type: "shell_command",
-          minimal_client_version: "0.124.0",
-        };
+  // Apply defaults even when a seed exists: v1.4.0 catalogs omitted required
+  // ModelInfo fields, so copying them as-is keeps Codex from loading config.
+  const base = {
+    prefer_websockets: false,
+    support_verbosity: true,
+    default_verbosity: "low",
+    input_modalities: ["text", "image"],
+    supports_parallel_tool_calls: true,
+    shell_type: "shell_command",
+    minimal_client_version: "0.124.0",
+    base_instructions: "You are a coding assistant. Help the user with software development tasks.",
+    supports_reasoning_summaries: false,
+    truncation_policy: { mode: "tokens" as const, limit: 10000 },
+    experimental_supported_tools: [],
+    ...(seed ?? fallbackTemplate),
+  };
 
   const isOpenAINative =
     model.id.toLowerCase().startsWith("gpt-") ||
@@ -387,7 +401,7 @@ export async function syncCodexModelCatalog(
 
   // Seed from any existing catalog (user's custom-models.json or our previous
   // catalog) so we preserve rich Codex metadata like base_instructions.
-  const seed = new Map<string, CodexCatalogModelEntry>();
+  const seed = new Map<string, CodexCatalogSeedEntry>();
   if (
     typeof existingConfig.model_catalog_json === "string" &&
     existingConfig.model_catalog_json !== catalogPath
