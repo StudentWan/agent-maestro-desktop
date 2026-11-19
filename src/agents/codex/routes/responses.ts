@@ -475,9 +475,7 @@ export function registerResponsesRoute(
       // context_length_exceeded — without this Codex just dies with a
       // raw "server_error" on long sessions and loses the conversation.
       const isContextExceeded = isContextWindowExceededError(error, message);
-      const errorCode = isContextExceeded
-        ? "context_length_exceeded"
-        : "server_error";
+      const errorCode = resolveUpstreamErrorCode(error, isContextExceeded);
       const errorMessage = isContextExceeded
         ? "Model context window exceeded; compact and retry."
         : message;
@@ -566,4 +564,29 @@ function isContextWindowExceededError(error: unknown, message: string): boolean 
     if (CONTEXT_EXCEEDED_PATTERNS.test(error.body)) return true;
   }
   return CONTEXT_EXCEEDED_PATTERNS.test(message);
+}
+
+/**
+ * Classify upstream failures into OpenAI Responses error codes. Deterministic
+ * 4xx request errors (other than 408/429/413/context-length) use
+ * `invalid_request_error` rather than `server_error` so Codex CLI surfaces the
+ * failure immediately instead of retrying 5 times with backoff.
+ */
+function resolveUpstreamErrorCode(
+  error: unknown,
+  isContextExceeded: boolean,
+): string {
+  if (isContextExceeded) {
+    return "context_length_exceeded";
+  }
+  if (
+    error instanceof CopilotUpstreamError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  ) {
+    return "invalid_request_error";
+  }
+  return "server_error";
 }

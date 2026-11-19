@@ -9,6 +9,10 @@ import {
 } from "./tool-converter";
 import type {
   ResponsesContentPart,
+  ResponsesCustomToolCallInput,
+  ResponsesCustomToolCallOutputInput,
+  ResponsesFunctionCallInput,
+  ResponsesFunctionCallOutputInput,
   ResponsesInputItem,
   ResponsesMessageInput,
   ResponsesRequest,
@@ -74,9 +78,7 @@ export function convertResponsesToOpenAI(
   }
 
   const items = normalizeInput(request.input);
-  for (const item of items) {
-    appendItem(messages, item);
-  }
+  appendInputItems(messages, items);
 
   // If after flattening we somehow ended up with zero messages, emit a
   // placeholder user turn rather than 400'ing — matches Claude's converter
@@ -133,61 +135,165 @@ function normalizeInput(input: ResponsesRequest["input"]): ResponsesInputItem[] 
   return input;
 }
 
+type ToolCallInputItem =
+  | ResponsesFunctionCallInput
+  | ResponsesCustomToolCallInput;
+
+type ToolOutputInputItem =
+  | ResponsesFunctionCallOutputInput
+  | ResponsesCustomToolCallOutputInput;
+
 /**
- * Translate one Responses input item into the equivalent ChatCompletions
- * messages and append them. Function-call output items become `tool` role
- * messages — they MUST follow the assistant message carrying the matching
- * `tool_calls`, which the upstream Codex CLI already orders correctly, so we
- * preserve the source order.
+ * Translate Responses `input` items into ChatCompletions `messages` while
+ * strictly preserving ChatCompletions tool-call invariants:
+ *   1. Every `role: "tool"` message has a non-empty `tool_call_id` matching an
+ *      immediately preceding `assistant.tool_calls` entry (1-to-1).
+ *   2. Standalone/orphaned `function_call_output` items (such as Codex App
+ *      Desktop's `agent/browser_tabs` context items without `call_id`) degrade
+ *      to plain user context messages instead of invalid `role: "tool"` turns.
+ *   3. Unanswered tool calls (e.g. from interrupted turns or subagent forks)
+ *      receive a synthetic tool response so call/response counts always match.
+ *   4. Intervening messages injected while a tool was executing never split an
+ *      `assistant.tool_calls` message from its `role: "tool"` responses.
  */
-function appendItem(
+function appendInputItems(
   messages: CopilotMessage[],
-  item: ResponsesInputItem,
+  items: ResponsesInputItem[],
 ): void {
-  switch (item.type) {
-    case "function_call": {
-      const call: CopilotToolCall = {
-        id: item.call_id,
-        type: "function",
-        function: {
-          name: item.name,
-          arguments: item.arguments ?? "",
-        },
-      };
-      // Group consecutive function_call items from the same turn into a
-      // single assistant message with `tool_calls`, matching OpenAI and
-      // Gemini ChatCompletions turn-alternation expectations.
-      const prev = messages[messages.length - 1];
-      if (prev && prev.role === "assistant" && Array.isArray(prev.tool_calls)) {
-        prev.tool_calls.push(call);
-      } else {
-        messages.push({
-          role: "assistant",
-          content: null,
-          tool_calls: [call],
+  const outputIndicesByCallId = new Map<string, number[]>();
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
+    if (!isToolOutputItem(item)) continue;
+    const callId = normalizeCallId(item.call_id);
+    if (!callId) continue;
+    const existing = outputIndicesByCallId.get(callId);
+    if (existing) {
+      existing.push(idx);
+    } else {
+      outputIndicesByCallId.set(callId, [idx]);
+    }
+  }
+
+  const consumedOutputIndices = new Set<number>();
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || typeof item !== "object") continue;
+
+    if (isToolCallItem(item)) {
+      const batchCalls: Array<{ index: number; item: ToolCallInputItem }> = [];
+      let cursor = i;
+      while (cursor < items.length) {
+        const candidate = items[cursor];
+        if (isToolCallItem(candidate)) {
+          batchCalls.push({ index: cursor, item: candidate });
+          cursor++;
+          continue;
+        }
+        if (isIgnorableBetweenToolCalls(candidate)) {
+          cursor++;
+          continue;
+        }
+        break;
+      }
+
+      const usedIdsInBatch = new Set<string>();
+      const toolCalls: CopilotToolCall[] = [];
+      const toolResponses: CopilotMessage[] = [];
+
+      for (const { index: callIdx, item: callItem } of batchCalls) {
+        const rawCallId = normalizeCallId(callItem.call_id);
+        let matchedOutputIdx: number | undefined;
+        if (rawCallId) {
+          const queue = outputIndicesByCallId.get(rawCallId);
+          if (queue) {
+            while (
+              queue.length > 0 &&
+              (queue[0] <= callIdx || consumedOutputIndices.has(queue[0]))
+            ) {
+              queue.shift();
+            }
+            if (queue.length > 0) {
+              matchedOutputIdx = queue.shift();
+              if (matchedOutputIdx !== undefined) {
+                consumedOutputIndices.add(matchedOutputIdx);
+              }
+            }
+          }
+        }
+
+        let effectiveCallId = rawCallId ?? `call_missing_${callIdx}`;
+        if (usedIdsInBatch.has(effectiveCallId)) {
+          effectiveCallId = `${effectiveCallId}_${callIdx}`;
+        }
+        usedIdsInBatch.add(effectiveCallId);
+
+        const toolName =
+          typeof callItem.name === "string" && callItem.name.trim().length > 0
+            ? callItem.name.trim()
+            : "unknown_tool";
+        const toolArguments =
+          callItem.type === "custom_tool_call"
+            ? serializeCustomToolInput(callItem.input)
+            : typeof callItem.arguments === "string"
+              ? callItem.arguments
+              : JSON.stringify(callItem.arguments ?? {});
+
+        toolCalls.push({
+          id: effectiveCallId,
+          type: "function",
+          function: {
+            name: toolName,
+            arguments: toolArguments,
+          },
+        });
+
+        const outputContent =
+          matchedOutputIdx !== undefined
+            ? stringifyToolOutput(
+                (items[matchedOutputIdx] as ToolOutputInputItem).output,
+              )
+            : "[No tool output recorded]";
+
+        toolResponses.push({
+          role: "tool",
+          content: outputContent,
+          tool_call_id: effectiveCallId,
         });
       }
-      return;
-    }
 
-    case "function_call_output": {
       messages.push({
-        role: "tool",
-        content: stringifyToolOutput(item.output),
-        tool_call_id: item.call_id,
+        role: "assistant",
+        content: null,
+        tool_calls: toolCalls,
       });
-      return;
+      messages.push(...toolResponses);
+
+      i = cursor - 1;
+      continue;
     }
 
-    case "message":
-    case undefined: {
-      // Plain message: role + content (string or content parts array).
+    if (isToolOutputItem(item)) {
+      if (consumedOutputIndices.has(i)) {
+        continue;
+      }
+      const standaloneText = formatStandaloneToolOutput(item);
+      if (standaloneText !== null) {
+        messages.push({
+          role: "user",
+          content: standaloneText,
+        });
+      }
+      continue;
+    }
+
+    if (item.type === "message" || item.type === undefined) {
       const role = item.role;
       const text = stringifyMessageContent(item.content);
       // Skip empty assistant text items left behind by empty/aborted turns;
       // Gemini ChatCompletions rejects or stalls on empty model turns.
       if (role === "assistant" && text === "") {
-        return;
+        continue;
       }
       // System / developer roles in Responses both map to the OpenAI
       // "system" role since Copilot's ChatCompletions doesn't model
@@ -195,15 +301,86 @@ function appendItem(
       const mappedRole: CopilotMessage["role"] =
         role === "developer" ? "system" : role;
       messages.push({ role: mappedRole, content: text });
-      return;
+      continue;
     }
 
-    default: {
-      // Unknown item type — ignore rather than blow up. Future Responses
-      // additions (e.g. image_url, refusal) will be transparent to us.
-      return;
-    }
+    // Unknown item type — ignore rather than blow up. Future Responses
+    // additions (e.g. reasoning, additional_tools, refusal) remain transparent.
   }
+}
+
+function isToolCallItem(item: ResponsesInputItem): item is ToolCallInputItem {
+  return (
+    Boolean(item) &&
+    typeof item === "object" &&
+    (item.type === "function_call" || item.type === "custom_tool_call")
+  );
+}
+
+function isToolOutputItem(
+  item: ResponsesInputItem,
+): item is ToolOutputInputItem {
+  return (
+    Boolean(item) &&
+    typeof item === "object" &&
+    (item.type === "function_call_output" ||
+      item.type === "custom_tool_call_output")
+  );
+}
+
+function isIgnorableBetweenToolCalls(item: ResponsesInputItem): boolean {
+  if (!item || typeof item !== "object") return true;
+  if (isToolCallItem(item) || isToolOutputItem(item)) return false;
+  if (item.type === "message" || item.type === undefined) {
+    return (
+      item.role === "assistant" &&
+      stringifyMessageContent(item.content) === ""
+    );
+  }
+  return true;
+}
+
+function normalizeCallId(callId: unknown): string | undefined {
+  if (typeof callId !== "string") return undefined;
+  const trimmed = callId.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function serializeCustomToolInput(
+  input:
+    | string
+    | ResponsesContentPart[]
+    | Record<string, unknown>
+    | undefined
+    | null,
+): string {
+  if (input === undefined || input === null) {
+    return "{}";
+  }
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return JSON.stringify(input);
+  }
+  return JSON.stringify({ input: stringifyToolOutput(input) });
+}
+
+function formatStandaloneToolOutput(item: ToolOutputInputItem): string | null {
+  const body = stringifyToolOutput(item.output);
+  const name = typeof item.name === "string" ? item.name.trim() : "";
+  const namespace =
+    typeof item.namespace === "string" ? item.namespace.trim() : "";
+  const callId = normalizeCallId(item.call_id) ?? "";
+
+  const qualifier =
+    namespace && name
+      ? `${namespace}/${name}`
+      : name || namespace || callId;
+
+  if (!body && !qualifier) {
+    return null;
+  }
+
+  const header = qualifier ? `[Tool output: ${qualifier}]` : "[Tool output]";
+  return body ? `${header}\n${body}` : header;
 }
 
 function stringifyToolOutput(

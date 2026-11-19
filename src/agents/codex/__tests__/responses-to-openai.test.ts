@@ -304,4 +304,222 @@ describe("convertResponsesToOpenAI", () => {
       content: "Loaded image: [Image content omitted]",
     });
   });
+
+  it("converts standalone function_call_output without call_id (e.g. Codex App agent/browser_tabs) into user context instead of invalid tool role", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "inspect open tabs" },
+        {
+          type: "function_call_output",
+          id: "fco_01a1ed68",
+          name: "browser_tabs",
+          namespace: "agent",
+          output: '{"tabs":[{"title":"Docs","url":"https://example.com"}]}',
+        },
+        { role: "user", content: "summarize" },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      { role: "user", content: "inspect open tabs" },
+      {
+        role: "user",
+        content:
+          '[Tool output: agent/browser_tabs]\n{"tabs":[{"title":"Docs","url":"https://example.com"}]}',
+      },
+      { role: "user", content: "summarize" },
+    ]);
+  });
+
+  it("converts orphaned function_call_output whose call_id has no preceding function_call into user context", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_compacted_away",
+          output: "previous command output",
+        },
+        { role: "user", content: "what failed?" },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      {
+        role: "user",
+        content: "[Tool output: call_compacted_away]\nprevious command output",
+      },
+      { role: "user", content: "what failed?" },
+    ]);
+  });
+
+  it("synthesizes matching tool responses for unanswered or call_id-less function_call items", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "delegate task" },
+        {
+          type: "function_call",
+          call_id: "call_spawn_1",
+          name: "spawn_agent",
+          arguments: '{"prompt":"subtask"}',
+        },
+        {
+          type: "function_call",
+          name: "missing_id_tool",
+          arguments: "{}",
+        },
+        { role: "developer", content: "subagent forked" },
+        { role: "user", content: "continue" },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      { role: "user", content: "delegate task" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_spawn_1",
+            type: "function",
+            function: { name: "spawn_agent", arguments: '{"prompt":"subtask"}' },
+          },
+          {
+            id: "call_missing_2",
+            type: "function",
+            function: { name: "missing_id_tool", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_spawn_1",
+        content: "[No tool output recorded]",
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_missing_2",
+        content: "[No tool output recorded]",
+      },
+      { role: "system", content: "subagent forked" },
+      { role: "user", content: "continue" },
+    ]);
+  });
+
+  it("keeps assistant.tool_calls adjacent to tool responses when reasoning or steering messages appear mid-turn", () => {
+    const req = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "run checks" },
+        {
+          type: "function_call",
+          call_id: "call_a",
+          name: "exec_command",
+          arguments: '{"cmd":"npm test"}',
+        },
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [{ type: "summary_text", text: "checking lint too" }],
+        },
+        {
+          type: "function_call",
+          call_id: "call_b",
+          name: "exec_command",
+          arguments: '{"cmd":"npm run lint"}',
+        },
+        { role: "user", content: "also check types" },
+        {
+          type: "function_call_output",
+          call_id: "call_b",
+          output: "lint clean",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_a",
+          output: "tests passed",
+        },
+      ],
+    } as unknown as ResponsesRequest;
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      { role: "user", content: "run checks" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_a",
+            type: "function",
+            function: { name: "exec_command", arguments: '{"cmd":"npm test"}' },
+          },
+          {
+            id: "call_b",
+            type: "function",
+            function: {
+              name: "exec_command",
+              arguments: '{"cmd":"npm run lint"}',
+            },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_a", content: "tests passed" },
+      { role: "tool", tool_call_id: "call_b", content: "lint clean" },
+      { role: "user", content: "also check types" },
+    ]);
+  });
+
+  it("converts custom_tool_call + custom_tool_call_output from prior GPT turns when switching to ChatCompletions models", () => {
+    const req: ResponsesRequest = {
+      model: "gemini-4-hydrogen",
+      input: [
+        { role: "user", content: "patch file" },
+        {
+          type: "custom_tool_call",
+          call_id: "call_patch_1",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** End Patch",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_patch_1",
+          output: "Success. Updated files.",
+        },
+        { role: "user", content: "verify" },
+      ],
+    };
+
+    const result = convertResponsesToOpenAI(req);
+    expect(result.messages).toEqual([
+      { role: "user", content: "patch file" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_patch_1",
+            type: "function",
+            function: {
+              name: "apply_patch",
+              arguments: JSON.stringify({
+                input: "*** Begin Patch\n*** End Patch",
+              }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_patch_1",
+        content: "Success. Updated files.",
+      },
+      { role: "user", content: "verify" },
+    ]);
+  });
 });
