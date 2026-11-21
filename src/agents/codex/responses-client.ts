@@ -15,9 +15,10 @@
  *     tripping them through ChatCompletions loses information, so we keep
  *     the native Responses events and payloads.
  *
- * So this client does the boring thing: take the body Codex CLI sent us,
- * forward it verbatim to `${baseUrl}/responses` with Copilot auth headers,
- * and stream the response back. The Codex route handler normalizes unstable
+ * This client forwards Codex's native body to `${baseUrl}/responses` with
+ * Copilot auth headers and streams the response back. A connection-ownership
+ * rejection gets one retry without stale item IDs and reasoning history.
+ * The Codex route handler normalizes unstable
  * output item IDs in SSE events; other response payload fields are preserved.
  * Unsupported request parameters are stripped by sanitizeBody below.
  *
@@ -31,6 +32,7 @@ import {
   buildCopilotStreamHeaders,
 } from "../../copilot/headers";
 import { CopilotUpstreamError, truncateUpstreamBody } from "../../copilot/upstream-error";
+import { isHistoryOwnershipError, prepareHistoryRecovery } from "./responses-history";
 
 /** Resolve `${baseUrl}/responses`, normalising any trailing `/v1` segment. */
 function resolveResponsesUrl(baseUrl: string): string {
@@ -148,22 +150,7 @@ export class CopilotResponsesClient {
    * body unchanged from Copilot.
    */
   async createResponse(body: unknown): Promise<unknown> {
-    const tokenBundle = await this.tokenManager.getTokenBundle();
-    const headers = buildCopilotHeaders(tokenBundle.token);
-    const response = await fetch(resolveResponsesUrl(tokenBundle.baseUrl), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ ...(sanitizeBody(body) as object), stream: false }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new CopilotUpstreamError(
-        `Copilot Responses API error (${response.status})`,
-        response.status,
-        truncateUpstreamBody(text),
-      );
-    }
+    const response = await this.send(body, false);
     return response.json();
   }
 
@@ -173,23 +160,43 @@ export class CopilotResponsesClient {
    * returning it to Codex. The upstream already speaks native Responses SSE.
    */
   async createResponseStream(body: unknown): Promise<Response> {
-    const tokenBundle = await this.tokenManager.getTokenBundle();
-    const headers = buildCopilotStreamHeaders(tokenBundle.token);
-    const response = await fetch(resolveResponsesUrl(tokenBundle.baseUrl), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ ...(sanitizeBody(body) as object), stream: true }),
-    });
+    return this.send(body, true);
+  }
 
-    if (!response.ok) {
+  private async send(body: unknown, stream: boolean): Promise<Response> {
+    const tokenBundle = await this.tokenManager.getTokenBundle();
+    let requestBody = { ...(sanitizeBody(body) as object), stream };
+
+    // Only retry a rejected HTTP request, before any SSE events or tool calls
+    // have reached Codex. Never replay a stream that has already started.
+    for (let attempt = 0; ; attempt++) {
+      const headers = stream
+        ? buildCopilotStreamHeaders(tokenBundle.token)
+        : buildCopilotHeaders(tokenBundle.token);
+      const response = await fetch(resolveResponsesUrl(tokenBundle.baseUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      if (response.ok) return response;
+
       const text = await response.text();
+      if (attempt === 0 && isHistoryOwnershipError(response.status, text)) {
+        const recovery = prepareHistoryRecovery(requestBody);
+        if (recovery) {
+          console.warn(
+            "[Codex Responses] Retrying rejected history once:",
+            `${recovery.removedIds} item IDs and ${recovery.removedReasoning} reasoning items removed; conversation and tool content retained.`,
+          );
+          requestBody = { ...recovery.body, stream };
+          continue;
+        }
+      }
       throw new CopilotUpstreamError(
-        `Copilot Responses API stream error (${response.status})`,
+        `Copilot Responses API${stream ? " stream" : ""} error (${response.status})`,
         response.status,
         truncateUpstreamBody(text),
       );
     }
-
-    return response;
   }
 }

@@ -53,6 +53,22 @@ The installer will be generated in the `out/make` directory.
 
 ## FAQ
 
+### Continuing Codex chats after switching Copilot accounts
+
+When Copilot rejects saved history with `input item does not belong to this
+connection` (including the `input item ID` variant), the proxy retries the
+request once without the old item IDs and reasoning state. Chat text, images,
+tool arguments/results and their `call_id` relationships are retained. The
+original Codex chat history is not edited, and healthy requests keep their
+reasoning history.
+
+This recovery applies to HTTP 400/401 responses before streaming starts;
+ordinary authentication failures are not retried. Encrypted compaction and
+reference-only items are retained because removing them could lose earlier
+context. If those items also belong to the old account, automatic recovery may
+still fail: their context must be rebuilt from readable history. The proxy does
+not silently discard them or replay a stream that has already started.
+
 - **Login failed?** Make sure you have an active Copilot subscription and your token has not expired
 - **Claude Code / VSCode not connecting?** Check your `~/.claude/settings.json` — the proxy port and token must match
 - **Icons not showing?** Clear your Windows icon cache and ensure icon.ico is generated with electron-icon-builder
