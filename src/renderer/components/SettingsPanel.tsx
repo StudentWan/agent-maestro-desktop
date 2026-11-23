@@ -4,12 +4,18 @@ const api = window.copilotBridge;
 
 export default function SettingsPanel() {
   const [autoStart, setAutoStart] = useState(false);
+  const [showGeminiReasoning, setShowGeminiReasoning] = useState<boolean | null>(null);
+  const [savingGeminiReasoning, setSavingGeminiReasoning] = useState(false);
+  const [geminiReasoningError, setGeminiReasoningError] = useState<string | null>(null);
   const [savingLog, setSavingLog] = useState(false);
   const [logSaveMessage, setLogSaveMessage] = useState<string | null>(null);
 
   useEffect(() => {
     api.getAutoStart().then((enabled: boolean) => {
       setAutoStart(enabled);
+    });
+    api.getShowCodexGeminiReasoning().then(setShowGeminiReasoning).catch(() => {
+      setGeminiReasoningError("Could not load Gemini reasoning preference.");
     });
   }, []);
 
@@ -18,6 +24,19 @@ export default function SettingsPanel() {
     setAutoStart(newValue);
     api.setAutoStart(newValue);
   }, [autoStart]);
+
+  const handleToggleGeminiReasoning = useCallback(async (enabled: boolean) => {
+    setSavingGeminiReasoning(true);
+    setGeminiReasoningError(null);
+    try {
+      await api.setShowCodexGeminiReasoning(enabled);
+      setShowGeminiReasoning(enabled);
+    } catch {
+      setGeminiReasoningError("Could not save Gemini reasoning preference.");
+    } finally {
+      setSavingGeminiReasoning(false);
+    }
+  }, []);
 
   const handleSaveDiagnosticLog = useCallback(async () => {
     setSavingLog(true);
@@ -61,6 +80,29 @@ export default function SettingsPanel() {
               }`}
             />
           </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-gray-700 pt-4">
+          <div>
+            <label htmlFor="codex-gemini-reasoning" className="text-sm text-gray-300">
+              Show Gemini reasoning summaries in Codex
+            </label>
+            <p id="codex-gemini-reasoning-help" className="text-xs text-gray-500">
+              Applies to new responses. Does not change reasoning effort.
+            </p>
+            {geminiReasoningError && (
+              <p role="alert" className="text-xs text-red-400 mt-1">{geminiReasoningError}</p>
+            )}
+          </div>
+          <input
+            id="codex-gemini-reasoning"
+            type="checkbox"
+            role="switch"
+            aria-describedby="codex-gemini-reasoning-help"
+            checked={showGeminiReasoning === true}
+            disabled={showGeminiReasoning === null || savingGeminiReasoning}
+            onChange={(event) => void handleToggleGeminiReasoning(event.currentTarget.checked)}
+            className="h-4 w-4 shrink-0 accent-blue-600 disabled:opacity-50"
+          />
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-gray-700 pt-4">
           <div className="min-w-0">

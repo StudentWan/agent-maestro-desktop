@@ -8,6 +8,7 @@ const store = new Store<StoreSchema>({
     codespaceToken: null,
     proxyPort: DEFAULT_PROXY_PORT,
     autoStart: true,
+    showCodexGeminiReasoning: true,
     minimizeToTray: true,
     selectedModels: {},
     selectedModelContextWindows: {},
@@ -61,6 +62,14 @@ export function getAutoStart(): boolean {
 
 export function setAutoStart(enabled: boolean): void {
   store.set("autoStart", enabled);
+}
+
+export function getShowCodexGeminiReasoning(): boolean {
+  return store.get("showCodexGeminiReasoning");
+}
+
+export function setShowCodexGeminiReasoning(enabled: boolean): void {
+  store.set("showCodexGeminiReasoning", enabled);
 }
 
 export function getMinimizeToTray(): boolean {

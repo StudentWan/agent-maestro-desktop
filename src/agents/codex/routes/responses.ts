@@ -20,6 +20,7 @@ import type { CopilotCompletionRequest } from "../../../copilot/types";
 export interface CodexResponsesServices {
   responses: Pick<CopilotResponsesClient, "createResponse" | "createResponseStream">;
   chat?: Pick<CopilotClient, "chatCompletion" | "chatCompletionStream">;
+  showGeminiReasoning?: boolean;
 }
 
 function resolveServices(
@@ -254,6 +255,8 @@ export function registerResponsesRoute(
       if (isStream) {
         const inputEstimate = Math.ceil(JSON.stringify(requestBody).length / 6);
         c.set("loggedInputTokens", inputEstimate);
+        const emitReasoning =
+          services.showGeminiReasoning !== false || !/^(google\/)?gemini-/i.test(originalModel);
 
         const firstUpstream = await openStreamWithReasoningFallback(attempts[0]);
         if (!firstUpstream.body) {
@@ -294,7 +297,7 @@ export function registerResponsesRoute(
             if (!upstream.body) continue;
 
             const reader = upstream.body
-              .pipeThrough(createResponsesStreamTransformer(originalModel))
+              .pipeThrough(createResponsesStreamTransformer(originalModel, { emitReasoning }))
               .getReader();
 
             const preOutputBuffer: string[] = [];

@@ -24,6 +24,8 @@ export type IpcChannels =
   // ---- Settings ----
   | "settings:get-auto-start"
   | "settings:set-auto-start"
+  | "settings:get-show-codex-gemini-reasoning"
+  | "settings:set-show-codex-gemini-reasoning"
   // ---- Codespace ----
   | "codespace:check-gh-cli"
   | "codespace:list"

@@ -530,6 +530,73 @@ describe("codex responses route", () => {
     expect(chatCompletion).not.toHaveBeenCalled();
   });
 
+  it("applies the local Gemini summary setting on each Codex request without changing upstream input", async () => {
+    const chatCompletionStream = vi.fn().mockImplementation(async () => {
+      const chunks = [
+        { choices: [{ delta: { reasoning_text: "summary from upstream" } }] },
+        { choices: [{ delta: { content: "answer" } }] },
+        {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: "call_lookup",
+                function: { name: "lookup", arguments: "{}" },
+              }],
+            },
+            finish_reason: "tool_calls",
+          }],
+          usage: { completion_tokens: 6, completion_tokens_details: { reasoning_tokens: 4 } },
+        },
+      ];
+      return new Response(
+        chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+      );
+    });
+    let showGeminiReasoning: boolean | undefined;
+    const app = new Hono();
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({}),
+      chat: { chatCompletion: vi.fn(), chatCompletionStream },
+      showGeminiReasoning,
+    }));
+    async function getEvents(model: string) {
+      const res = await app.request("/codex/v1/responses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model, input: "hi", stream: true, reasoning: { effort: "high" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      return (await res.text()).split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice(6)));
+    }
+
+    const defaultEvents = await getEvents("gemini-4-hydrogen");
+    showGeminiReasoning = false;
+    const hiddenEvents = await getEvents("gemini-4-hydrogen");
+    const otherModelEvents = await getEvents("mai-code-1.1-flash");
+    showGeminiReasoning = true;
+    const enabledEvents = await getEvents("gemini-4-hydrogen");
+
+    for (const events of [defaultEvents, otherModelEvents, enabledEvents]) {
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "response.reasoning_summary_text.delta", delta: "summary from upstream",
+      }));
+    }
+    expect(JSON.stringify(hiddenEvents)).not.toContain("summary from upstream");
+    expect(hiddenEvents.map((event) => event.type).join(" ")).not.toContain("reasoning");
+    const completed = hiddenEvents.find((event) => event.type === "response.completed");
+    expect(completed?.response.output).toMatchObject([
+      { type: "message", content: [{ type: "output_text", text: "answer" }] },
+      { type: "function_call", call_id: "call_lookup", name: "lookup", arguments: "{}" },
+    ]);
+    expect(completed?.response.usage.output_tokens_details.reasoning_tokens).toBe(4);
+    expect(chatCompletionStream.mock.calls[1]).toEqual(chatCompletionStream.mock.calls[0]);
+  });
+
   it("retries streaming ChatCompletions with tool_choice=required when first attempt emits an empty completion", async () => {
     const emptyStream = new Response(
       new TextEncoder().encode(

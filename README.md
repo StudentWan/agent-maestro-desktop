@@ -51,6 +51,8 @@ The installer will be generated in the `out/make` directory.
 3. Use the sidebar UI to switch models, view request logs, and modify settings
 4. The proxy port defaults to 23337 and can be customized in the settings page
 
+To hide Gemini's streamed reasoning summaries in Codex, turn off **Settings > Show Gemini reasoning summaries in Codex** in Agent Maestro. This local setting is on by default. Changes apply to new requests without restarting the proxy or editing Codex configuration. Answers, tool calls, reasoning effort, and existing conversation history are unaffected.
+
 ## FAQ
 
 - **Login failed?** Make sure you have an active Copilot subscription and your token has not expired

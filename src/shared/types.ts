@@ -121,6 +121,7 @@ export interface StoreSchema {
   codespaceToken: string | null;
   proxyPort: number;
   autoStart: boolean;
+  showCodexGeminiReasoning: boolean;
   minimizeToTray: boolean;
   /**
    * Per-agent selected model id. Keys are agent ids (e.g. "claude",

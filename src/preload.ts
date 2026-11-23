@@ -42,6 +42,10 @@ const api = {
   // Settings
   getAutoStart: () => ipcRenderer.invoke("settings:get-auto-start" satisfies IpcChannels),
   setAutoStart: (enabled: boolean) => ipcRenderer.invoke("settings:set-auto-start" satisfies IpcChannels, enabled),
+  getShowCodexGeminiReasoning: (): Promise<boolean> =>
+    ipcRenderer.invoke("settings:get-show-codex-gemini-reasoning" satisfies IpcChannels),
+  setShowCodexGeminiReasoning: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke("settings:set-show-codex-gemini-reasoning" satisfies IpcChannels, enabled),
 
   // Events from main process
   onAuthStatusChanged: (callback: (status: unknown) => void) => {
