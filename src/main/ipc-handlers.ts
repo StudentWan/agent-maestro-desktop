@@ -19,6 +19,8 @@ import {
   getProxyPort,
   getAutoStart,
   setAutoStart,
+  getShowCodexGeminiReasoning,
+  setShowCodexGeminiReasoning,
   getSelectedModel,
   setSelectedModel,
   getAllSelectedModels,
@@ -799,6 +801,20 @@ export function registerIpcHandlers(): void {
     }
     return enabled;
   });
+
+  ipcMain.handle(
+    "settings:get-show-codex-gemini-reasoning" satisfies IpcChannels,
+    () => getShowCodexGeminiReasoning(),
+  );
+  ipcMain.handle(
+    "settings:set-show-codex-gemini-reasoning" satisfies IpcChannels,
+    (_event, enabled: unknown) => {
+      if (typeof enabled !== "boolean") {
+        throw new TypeError("Gemini reasoning visibility must be a boolean");
+      }
+      setShowCodexGeminiReasoning(enabled);
+    },
+  );
 
   // --- Codespace handlers ---
 

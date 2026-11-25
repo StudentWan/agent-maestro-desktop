@@ -19,8 +19,9 @@ function buildCopilotSSE(payloads: unknown[]): Uint8Array {
  */
 async function runTransformer(
   bytes: Uint8Array,
+  emitReasoning = true,
 ): Promise<ResponsesStreamEvent[]> {
-  const transformer = createResponsesStreamTransformer("gpt-5");
+  const transformer = createResponsesStreamTransformer("gpt-5", { emitReasoning });
   const writer = transformer.writable.getWriter();
   void writer.write(bytes).then(() => writer.close());
 
@@ -248,15 +249,15 @@ describe("createResponsesStreamTransformer", () => {
     expect(completed?.response.usage?.output_tokens_details?.reasoning_tokens).toBe(4);
   });
 
-  it("emits response.failed when upstream emits only reasoning without any message or tool call", async () => {
+  it.each([true, false])("fails reasoning-only completions (show reasoning=%s)", async (emitReasoning) => {
     const sse = buildCopilotSSE([
       { choices: [{ index: 0, delta: { reasoning_text: "only thinking" }, finish_reason: null }] },
       { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
     ]);
 
-    const events = await runTransformer(sse);
+    const events = await runTransformer(sse, emitReasoning);
     const types = events.map((e) => e.type);
-    expect(types).toContain("response.reasoning_summary_text.delta");
+    expect(types.includes("response.reasoning_summary_text.delta")).toBe(emitReasoning);
     expect(types).toContain("response.failed");
     expect(types).not.toContain("response.completed");
   });

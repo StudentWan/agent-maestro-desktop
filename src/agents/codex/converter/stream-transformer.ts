@@ -37,6 +37,7 @@ import type {
  */
 export function createResponsesStreamTransformer(
   originalModel: string,
+  { emitReasoning = true }: { emitReasoning?: boolean } = {},
 ): TransformStream<Uint8Array, string> {
   let sequence = 0;
   let outputIndex = -1;
@@ -565,7 +566,9 @@ export function createResponsesStreamTransformer(
             choice.delta?.reasoning;
           if (typeof reasoningDelta === "string" && reasoningDelta !== "") {
             reasoningStarted = true;
-            out += handleReasoningDelta(reasoningDelta);
+            if (emitReasoning) {
+              out += handleReasoningDelta(reasoningDelta);
+            }
           }
 
           const textDelta = choice.delta?.content ?? choice.delta?.refusal;

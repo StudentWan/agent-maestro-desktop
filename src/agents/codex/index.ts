@@ -11,6 +11,7 @@
 import type { Hono } from "hono";
 import type { CopilotClient } from "../../copilot/client";
 import type { TokenManager } from "../../copilot/token-manager";
+import { getShowCodexGeminiReasoning } from "../../store/app-store";
 import type { AgentModelInfo, AgentPlugin } from "../types";
 import {
   applyCodexConfig,
@@ -50,6 +51,7 @@ export const codexPlugin: AgentPlugin = {
       return {
         responses: new CopilotResponsesClient(client.getTokenManager()),
         chat: client,
+        showGeminiReasoning: getShowCodexGeminiReasoning(),
       };
     });
     registerCodexModelsRoute(app, () => {
