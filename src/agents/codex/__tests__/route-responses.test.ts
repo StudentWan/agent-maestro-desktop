@@ -654,4 +654,104 @@ describe("codex responses route", () => {
     expect(body.output[0].content[0].text).toBe("Recovered without reasoning_effort");
     resetCodexModelRoutingCache();
   });
+
+  it("handles Codex App threads with call_id-less function_call_output when routed to Gemini ChatCompletions", async () => {
+    const chatCompletion = vi.fn().mockResolvedValue({
+      id: "chatcmpl-gemini-tabs",
+      object: "chat.completion",
+      created: 1700000000,
+      model: "gemini-4-hydrogen",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Processed thread cleanly" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+
+    const app = new Hono();
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({}),
+      chat: { chatCompletion, chatCompletionStream: vi.fn() },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-4-hydrogen",
+        input: [
+          { role: "user", content: "hello" },
+          {
+            type: "function_call_output",
+            id: "fco_browser_tabs",
+            name: "browser_tabs",
+            namespace: "agent",
+            output: '{"tabs":[]}',
+          },
+          {
+            type: "function_call",
+            call_id: "call_ok",
+            name: "exec_command",
+            arguments: '{"cmd":"pwd"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_ok",
+            output: "/repo",
+          },
+          { role: "user", content: "continue" },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    const forwardedMessages = chatCompletion.mock.calls[0][0].messages;
+    for (const msg of forwardedMessages) {
+      if (msg.role === "tool") {
+        expect(typeof msg.tool_call_id).toBe("string");
+        expect(msg.tool_call_id.length).toBeGreaterThan(0);
+      }
+    }
+    expect(forwardedMessages).toContainEqual({
+      role: "user",
+      content: '[Tool output: agent/browser_tabs]\n{"tabs":[]}',
+    });
+  });
+
+  it("marks deterministic upstream HTTP 400 stream failures as invalid_request_error instead of server_error", async () => {
+    const app = new Hono();
+    const chatCompletionStream = vi
+      .fn()
+      .mockRejectedValue(
+        new CopilotUpstreamError(
+          "Copilot API stream error (400): bad tool format",
+          400,
+          '{"error":{"message":"Tool call ID is required","code":"invalid_tool_call_format"}}',
+        ),
+      );
+
+    registerResponsesRoute(app, () => ({
+      responses: makeClient({}),
+      chat: { chatCompletion: vi.fn(), chatCompletionStream },
+    }));
+
+    const res = await app.request("/codex/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-4-hydrogen",
+        input: "hi",
+        stream: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: response.failed");
+    expect(text).toContain('"code":"invalid_request_error"');
+    expect(text).not.toContain('"code":"server_error"');
+  });
 });

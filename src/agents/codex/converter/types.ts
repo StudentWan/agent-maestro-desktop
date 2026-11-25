@@ -40,7 +40,9 @@ export interface ResponsesRequest {
 export type ResponsesInputItem =
   | ResponsesMessageInput
   | ResponsesFunctionCallInput
-  | ResponsesFunctionCallOutputInput;
+  | ResponsesFunctionCallOutputInput
+  | ResponsesCustomToolCallInput
+  | ResponsesCustomToolCallOutputInput;
 
 export interface ResponsesMessageInput {
   type?: "message"; // Codex frequently omits this for plain message items
@@ -50,14 +52,42 @@ export interface ResponsesMessageInput {
 
 export interface ResponsesFunctionCallInput {
   type: "function_call";
-  call_id: string;
+  id?: string;
+  call_id?: string;
   name: string;
-  arguments: string;
+  namespace?: string;
+  arguments?: string;
 }
 
 export interface ResponsesFunctionCallOutputInput {
   type: "function_call_output";
-  call_id: string;
+  id?: string;
+  /**
+   * Optional because Codex App Desktop injects standalone context items
+   * (e.g. `agent/browser_tabs`) as `function_call_output` without a `call_id`
+   * or preceding `function_call`.
+   */
+  call_id?: string;
+  name?: string;
+  namespace?: string;
+  output: string | ResponsesContentPart[] | Record<string, unknown>;
+}
+
+export interface ResponsesCustomToolCallInput {
+  type: "custom_tool_call";
+  id?: string;
+  call_id?: string;
+  name: string;
+  namespace?: string;
+  input?: string | ResponsesContentPart[] | Record<string, unknown>;
+}
+
+export interface ResponsesCustomToolCallOutputInput {
+  type: "custom_tool_call_output";
+  id?: string;
+  call_id?: string;
+  name?: string;
+  namespace?: string;
   output: string | ResponsesContentPart[] | Record<string, unknown>;
 }
 
